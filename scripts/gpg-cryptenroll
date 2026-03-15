@@ -1,0 +1,591 @@
+#!/bin/sh
+set -eu
+
+usage() {
+  cat <<'EOF'
+Usage: gpg-cryptenroll <token:auto|token:NN|file:/abs/path> <luks-device> [options]
+
+Generates random plaintext key material in /run (tmpfs), encrypts it with GPG,
+and writes the encrypted key blob to the output path.
+
+Required positional arguments:
+  <key-spec>            Key storage mode:
+                        token:auto      Store blob in LUKS2 token, auto token id
+                        token:NN        Store blob in LUKS2 token id NN (0-31)
+                        file:/abs/path  Write encrypted key to this absolute path
+  <luks-device>         LUKS block device (e.g. /dev/sda3, /dev/nvme0n1p12,
+                        UUID=..., LABEL=..., PARTUUID=..., PARTLABEL=...)
+
+Options:
+  --recipient <gpg-id>  GPG recipient (key ID, fingerprint, uid, or 'auto') [default: auto]
+  --size-bytes <n>      Random source bytes before base64 (default: 65536;
+                        capped to 512 for token:* mode)
+  --force               Overwrite output file if it exists
+  --keep-plaintext      Keep plaintext key in /dev/shm after encryption
+  --keyslot <n|auto>    Enroll key into a LUKS keyslot; 'auto' picks the next
+                        available slot, a number replaces that specific slot [default: auto]
+  --debug               Print diagnostic information for key detection
+  --help                Show this help text
+
+Notes:
+  - Plaintext key is written under /dev/shm and does not survive reboot.
+  - Permissions are locked down (umask 077).
+  - When replacing a specific slot, you will be prompted once for an existing
+    LUKS passphrase to authorize the kill-and-add operation.
+EOF
+}
+
+KEY_SPEC=""
+RECIPIENT="auto"
+SIZE_BYTES=65536
+FORCE=0
+KEEP_PLAINTEXT=0
+KEYSLOT="auto"
+LUKS_DEVICE=""
+LUKS_DEVICE_SPEC=""
+TOKEN_MODE=0
+TOKEN_ID="auto"
+OUTPUT_PATH=""
+DELETE_OUTPUT=0
+DEBUG=0
+
+dbg() { [ "$DEBUG" -eq 1 ] && echo "[debug] $*" >&2 || true; }
+
+run_as_user() {
+    if [ -n "${SUDO_USER:-}" ]; then
+        _home="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
+        _rtdir="/run/user/$(id -u "$SUDO_USER")"
+        dbg "run_as_user: SUDO_USER=$SUDO_USER HOME=$_home XDG_RUNTIME_DIR=$_rtdir cmd=$*"
+        runuser -u "$SUDO_USER" -- \
+            env \
+                HOME="$_home" \
+                XDG_RUNTIME_DIR="$_rtdir" \
+                GPG_TTY="$(tty 2>/dev/null || true)" \
+                DISPLAY="${DISPLAY:-}" \
+                DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-}" \
+            "$@"
+    else
+        dbg "run_as_user: no SUDO_USER, running directly as $(id -un): cmd=$*"
+        "$@"
+    fi
+}
+
+die() {
+  echo "gpg-cryptenroll: $*" >&2
+  exit 1
+}
+
+spinner_start() {
+  _spinner_msg="$1"
+  printf '%s ' "$_spinner_msg" >&2
+  ( i=0
+    while true; do
+      i=$(( (i + 1) % 4 ))
+      case $i in
+        0) c='-' ;; 1) c='\\' ;; 2) c='|' ;; 3) c='/' ;;
+      esac
+      printf '\r%s %s' "$_spinner_msg" "$c" >&2
+      sleep 0.15
+    done
+  ) &
+  _spinner_pid=$!
+}
+
+spinner_stop() {
+  kill "$_spinner_pid" 2>/dev/null || true
+  wait "$_spinner_pid" 2>/dev/null || true
+  printf '\r%s ... done\n' "$_spinner_msg" >&2
+}
+
+find_card_encryption_fpr() {
+  _raw="$(run_as_user gpg --batch --no-tty --card-status 2>/dev/null)"
+  dbg "find_card_encryption_fpr: card-status exit=$? raw_lines=$(printf '%s' "$_raw" | wc -l)"
+  _fpr="$(printf '%s' "$_raw" \
+    | awk -F: '
+        /^Encryption key[. ]*:/ {
+          gsub(/ /, "", $2)
+          f=$2
+          if (f != "" && f != "[none]") {
+            print toupper(f)
+            exit
+          }
+        }
+      ')"
+  dbg "find_card_encryption_fpr: result='$_fpr'"
+  printf '%s' "$_fpr"
+}
+
+find_auto_candidates() {
+  _raw="$(run_as_user gpg --batch --with-colons --list-secret-keys --fingerprint 2>/dev/null)"
+  dbg "find_auto_candidates: list-secret-keys exit=$? raw_lines=$(printf '%s' "$_raw" | wc -l)"
+  _result="$(printf '%s' "$_raw" \
+    | awk -F: '
+        function has_enc(caps) {
+          return index(caps, "e") || index(caps, "E")
+        }
+        $1 == "sec" || $1 == "ssb" {
+          want = has_enc($12)
+          token = $15
+          next
+        }
+        $1 == "fpr" && want {
+          key = $10 "|" token
+          if (!seen[key]++) {
+            print key
+          }
+          want = 0
+          token = ""
+        }
+      ')"
+  dbg "find_auto_candidates: result_lines=$(printf '%s' "$_result" | awk 'NF' | wc -l)"
+  printf '%s\n' "$_result"
+}
+
+resolve_device_spec() {
+  _spec="$1"
+  case "$_spec" in
+    UUID=*)
+      _dev="$(blkid -U "${_spec#UUID=}" 2>/dev/null || true)"
+      ;;
+    LABEL=*)
+      _dev="$(blkid -L "${_spec#LABEL=}" 2>/dev/null || true)"
+      ;;
+    PARTUUID=*)
+      _dev="/dev/disk/by-partuuid/${_spec#PARTUUID=}"
+      ;;
+    PARTLABEL=*)
+      _dev="/dev/disk/by-partlabel/${_spec#PARTLABEL=}"
+      ;;
+    *)
+      _dev="$_spec"
+      ;;
+  esac
+
+  [ -n "$_dev" ] || die "unable to resolve device spec: $_spec"
+  [ -b "$_dev" ] || die "resolved device is not a block device: $_dev"
+  echo "$_dev"
+}
+
+resolve_device_spec_quiet() {
+  _spec="$1"
+  case "$_spec" in
+    UUID=*)
+      blkid -U "${_spec#UUID=}" 2>/dev/null || true
+      ;;
+    LABEL=*)
+      blkid -L "${_spec#LABEL=}" 2>/dev/null || true
+      ;;
+    PARTUUID=*)
+      echo "/dev/disk/by-partuuid/${_spec#PARTUUID=}"
+      ;;
+    PARTLABEL=*)
+      echo "/dev/disk/by-partlabel/${_spec#PARTLABEL=}"
+      ;;
+    *)
+      echo "$_spec"
+      ;;
+  esac
+}
+
+resolve_crypttab_name_for_device() {
+  _target_dev="$1"
+  [ -r /etc/crypttab ] || return 1
+
+  _target_real="$(readlink -f "$_target_dev" 2>/dev/null || echo "$_target_dev")"
+
+  while IFS= read -r _line; do
+    case "$_line" in ''|'#'*) continue ;; esac
+    set -- $_line
+    [ "$#" -ge 2 ] || continue
+    _ct_name="$1"
+    _ct_source="$2"
+    _ct_dev="$(resolve_device_spec_quiet "$_ct_source")"
+    [ -n "$_ct_dev" ] || continue
+    _ct_real="$(readlink -f "$_ct_dev" 2>/dev/null || echo "$_ct_dev")"
+    if [ "$_ct_real" = "$_target_real" ]; then
+      echo "$_ct_name"
+      return 0
+    fi
+  done </etc/crypttab
+
+  return 1
+}
+
+print_crypttab_guidance() {
+  _desired_key="$1"
+  _desired_opts="$2"
+  _mode="$3"
+  _source_dev="${LUKS_DEVICE:-<luks-device>}"
+  _crypttab_name="$(resolve_crypttab_name_for_device "$_source_dev" || true)"
+  [ -n "$_crypttab_name" ] || _crypttab_name="<name>"
+
+  echo "gpg-cryptenroll: set /etc/crypttab fields for $_mode mode:" >&2
+  echo "  field 3 (key): $_desired_key" >&2
+  echo "  field 4 (options): $_desired_opts" >&2
+  echo "  full /etc/crypttab line:" >&2
+  echo "    $_crypttab_name $_source_dev $_desired_key $_desired_opts" >&2
+  if [ "$_mode" = "file-based" ]; then
+    echo "" >&2
+    echo "  The keyscript=decrypt_gnupg-sc option is required so that stock" >&2
+    echo "  cryptroot calls gpg to decrypt the key file with the smartcard." >&2
+    echo "  Also copy the public key for initramfs:" >&2
+    echo "    gpg --export <recipient> >/etc/cryptsetup-initramfs/pubring.gpg" >&2
+  fi
+}
+
+resolve_auto_recipient() {
+  dbg "resolve_auto_recipient: probing card"
+  card_fpr="$(find_card_encryption_fpr || true)"
+  if [ -n "$card_fpr" ]; then
+    dbg "resolve_auto_recipient: card_fpr=$card_fpr, checking list-secret-keys"
+    if run_as_user gpg --batch --list-secret-keys "$card_fpr" >/dev/null 2>&1; then
+      dbg "resolve_auto_recipient: found card fpr in keyring"
+      echo "$card_fpr"
+      return 0
+    else
+      dbg "resolve_auto_recipient: card fpr NOT in keyring (stub not imported?)"
+    fi
+  else
+    dbg "resolve_auto_recipient: card-status returned no encryption key fpr"
+  fi
+
+  candidates="$(find_auto_candidates || true)"
+  [ -n "$candidates" ] || die "no encryption-capable secret keys found"
+
+  card_candidates="$(printf '%s\n' "$candidates" | awk -F'|' '$2 != "" { print $1 }' | awk '!seen[$0]++')"
+  card_count="$(printf '%s\n' "$card_candidates" | awk 'NF { c++ } END { print c + 0 }')"
+  if [ "$card_count" -eq 1 ]; then
+    printf '%s\n' "$card_candidates" | awk 'NF { print; exit }'
+    return 0
+  fi
+  if [ "$card_count" -gt 1 ]; then
+    echo "gpg-cryptenroll: multiple smartcard-backed encryption keys found; use --recipient explicitly:" >&2
+    printf '%s\n' "$card_candidates" | awk 'NF { print "  - " $0 }' >&2
+    exit 1
+  fi
+
+  all_candidates="$(printf '%s\n' "$candidates" | awk -F'|' '{ print $1 }' | awk '!seen[$0]++')"
+  all_count="$(printf '%s\n' "$all_candidates" | awk 'NF { c++ } END { print c + 0 }')"
+  if [ "$all_count" -eq 1 ]; then
+    printf '%s\n' "$all_candidates" | awk 'NF { print; exit }'
+    return 0
+  fi
+
+  echo "gpg-cryptenroll: multiple encryption-capable keys found; use --recipient explicitly:" >&2
+  printf '%s\n' "$all_candidates" | awk 'NF { print "  - " $0 }' >&2
+  exit 1
+}
+
+import_luks2_gpg_token() {
+  _dev="$1"
+  _slot="$2"
+  _tid="$3"
+  _recipient="$4"
+  _blob_path="$5"
+  _force="$6"
+
+  cryptsetup isLuks "$_dev" 2>/dev/null || die "$_dev is not a LUKS device"
+
+  # When an explicit token id is requested, refuse to overwrite unless --force.
+  if [ "$_tid" != "auto" ]; then
+    _existing="$(cryptsetup token export --token-id "$_tid" "$_dev" 2>/dev/null || true)"
+    if [ -n "$_existing" ]; then
+      if [ "$_force" -ne 1 ]; then
+        die "token id $_tid already exists on $_dev (use --force to overwrite)"
+      fi
+      echo "gpg-cryptenroll: token id $_tid exists; overwriting (--force set)"
+    fi
+  fi
+  _blob_b64="$(base64 <"$_blob_path" | tr -d '\n')"
+  [ -n "$_blob_b64" ] || die "failed to encode encrypted key for token storage"
+
+  _json_tmp="$(mktemp /dev/shm/root-gpg-token.XXXXXX.json)"
+  chmod 600 "$_json_tmp"
+  cat >"$_json_tmp" <<EOF
+{"type":"root-gpg","keyslots":[],"gpg-recipient":"$_recipient","gpg-key":"$_blob_b64"}
+EOF
+
+  _token_args=""
+  if [ "$_slot" != "" ] && [ "$_slot" != "auto" ]; then
+    _token_args="$_token_args --key-slot $_slot"
+  fi
+  if [ "$_tid" != "auto" ]; then
+    _token_args="$_token_args --token-id $_tid --token-replace"
+  fi
+
+  # shellcheck disable=SC2086
+  if ! cryptsetup token import $_token_args --json-file "$_json_tmp" "$_dev"; then
+    rm -f "$_json_tmp"
+    die "failed to import root-gpg token"
+  fi
+
+  rm -f "$_json_tmp"
+}
+
+if [ "$#" -gt 0 ] && [ "$1" = "--help" -o "$1" = "-h" ]; then
+  usage
+  exit 0
+fi
+
+[ "$#" -ge 2 ] || { usage >&2; exit 2; }
+KEY_SPEC="$1"
+LUKS_DEVICE_SPEC="$2"
+shift 2
+
+# Fail fast: verify that the target resolves to an existing block device
+# before processing any additional options or doing any key operations.
+LUKS_DEVICE="$(resolve_device_spec "$LUKS_DEVICE_SPEC")"
+
+# Modifying LUKS keyslots/tokens requires root privileges.
+[ "$(id -u)" -eq 0 ] || die "root privileges are required to enroll keys/tokens on $LUKS_DEVICE"
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --debug)
+      DEBUG=1
+      shift
+      ;;
+    --recipient)
+      RECIPIENT="${2:-}"
+      shift 2
+      ;;
+    --size-bytes)
+      SIZE_BYTES="${2:-}"
+      shift 2
+      ;;
+    --force)
+      FORCE=1
+      shift
+      ;;
+    --keep-plaintext)
+      KEEP_PLAINTEXT=1
+      shift
+      ;;
+    --keyslot)
+      KEYSLOT="${2:-}"
+      shift 2
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+case "$KEY_SPEC" in
+  token:auto)
+    TOKEN_MODE=1
+    TOKEN_ID="auto"
+    DELETE_OUTPUT=1
+    OUTPUT_PATH="$(mktemp /tmp/luks-root-smartcard.XXXXXX.gpg)"
+    echo "Using token mode with auto token id"
+    ;;
+  token:[0-9]|token:[0-9][0-9])
+    TOKEN_MODE=1
+    TOKEN_ID="${KEY_SPEC#token:}"
+    DELETE_OUTPUT=1
+    OUTPUT_PATH="$(mktemp /tmp/luks-root-smartcard.XXXXXX.gpg)"
+    echo "Using token mode with token id: $TOKEN_ID"
+    ;;
+  file:/*)
+    TOKEN_MODE=0
+    OUTPUT_PATH="${KEY_SPEC#file:}"
+    ;;
+  file:*)
+    die "key-spec file path must be absolute (use file:/abs/path)"
+    ;;
+  *)
+    die "key-spec must be one of: token:auto, token:NN, file:/abs/path"
+    ;;
+esac
+
+if [ "$RECIPIENT" = "auto" ]; then
+  RECIPIENT="$(resolve_auto_recipient)"
+  echo "Auto-selected recipient: $RECIPIENT"
+fi
+
+case "$SIZE_BYTES" in
+  ''|*[!0-9]*)
+    echo "--size-bytes must be a positive integer" >&2
+    exit 2
+    ;;
+esac
+
+# LUKS2 token JSON must fit in the header metadata area (~12 KB default).
+# 512 bytes of random (4096 bits) is more than enough entropy for a LUKS
+# passphrase and keeps the GPG-encrypted blob well under the limit.
+if [ "$TOKEN_MODE" -eq 1 ] && [ "$SIZE_BYTES" -gt 512 ]; then
+  echo "Capping --size-bytes from $SIZE_BYTES to 512 (LUKS2 header token size limit)"
+  SIZE_BYTES=512
+fi
+
+if [ "$SIZE_BYTES" -lt 32 ]; then
+  echo "--size-bytes must be at least 32" >&2
+  exit 2
+fi
+
+if [ "$DELETE_OUTPUT" -ne 1 ] && [ -e "$OUTPUT_PATH" ] && [ "$FORCE" -ne 1 ]; then
+  echo "Output already exists: $OUTPUT_PATH (use --force to overwrite)" >&2
+  exit 1
+fi
+
+if [ "$TOKEN_MODE" -eq 1 ]; then
+  case "$TOKEN_ID" in
+    auto|0|[1-9]|[1-2][0-9]|3[0-1]) : ;;
+    *) die "token id in key-spec must be auto or 0-31 (use token:auto or token:NN)" ;;
+  esac
+fi
+
+# Check write access to output directory before doing any work.
+_outdir="$(dirname "$OUTPUT_PATH")"
+if [ ! -w "$_outdir" ]; then
+  echo "gpg-cryptenroll: cannot write to $_outdir -- try running with sudo" >&2
+  exit 1
+fi
+
+if ! command -v gpg >/dev/null 2>&1; then
+  echo "gpg is required" >&2
+  exit 1
+fi
+
+if ! command -v base64 >/dev/null 2>&1; then
+  echo "base64 is required" >&2
+  exit 1
+fi
+
+umask 077
+
+OUTDIR=$(dirname "$OUTPUT_PATH")
+mkdir -p "$OUTDIR"
+
+# Create temp dir as SUDO_USER so gpg (run_as_user) can read it.
+# /dev/shm is a world-writable tmpfs and does not survive reboot.
+TMP_DIR=$(run_as_user mktemp -d /dev/shm/luks-root-smartcard.XXXXXX)
+chmod 700 "$TMP_DIR"
+PLAIN_KEY="$TMP_DIR/root.key.txt"
+
+spinner_start "Generating key material  (head -c $SIZE_BYTES /dev/urandom | base64)"
+head -c "$SIZE_BYTES" /dev/urandom | run_as_user sh -c "base64 > '$PLAIN_KEY'"
+spinner_stop
+
+# GPG output goes into the same user-owned tmp dir, then root moves it to OUTPUT.
+TMP_OUT="$TMP_DIR/root.key.gpg"
+
+spinner_start "Encrypting key  (gpg --encrypt --recipient $RECIPIENT)"
+run_as_user gpg --batch --yes --trust-model always \
+  --output "$TMP_OUT" \
+  --encrypt \
+  --recipient "$RECIPIENT" \
+  -- "$PLAIN_KEY"
+spinner_stop
+
+mv -f "$TMP_OUT" "$OUTPUT_PATH"
+if [ "$(id -u)" -eq 0 ]; then
+  chown 0:0 "$OUTPUT_PATH"
+fi
+chmod 600 "$OUTPUT_PATH"
+
+if [ "$DELETE_OUTPUT" -eq 1 ]; then
+  echo "Encrypted key file written temporarily: $OUTPUT_PATH"
+else
+  echo "Encrypted key file written: $OUTPUT_PATH"
+fi
+
+# ── LUKS keyslot enrollment ──────────────────────────────────────────────────
+if [ -n "$KEYSLOT" ]; then
+  case "$KEYSLOT" in
+    auto|[0-9]|[0-9][0-9]) : ;;
+    *) die "--keyslot must be 'auto' or a slot number (0-31)" ;;
+  esac
+
+  cryptsetup isLuks "$LUKS_DEVICE" 2>/dev/null \
+    || die "$LUKS_DEVICE is not a LUKS device"
+
+  if [ "$KEYSLOT" = "auto" ]; then
+    echo "Enrolling key into next available slot on $LUKS_DEVICE ..."
+    cryptsetup luksAddKey "$LUKS_DEVICE" "$PLAIN_KEY"
+    echo "Key successfully enrolled."
+  else
+    # Check whether the requested slot is already occupied.
+    if cryptsetup luksDump "$LUKS_DEVICE" 2>/dev/null \
+         | grep -qE "(^Key Slot ${KEYSLOT}: ENABLED|^[[:space:]]+${KEYSLOT}: luks)"; then
+      echo "Slot $KEYSLOT is occupied; replacing (passphrase required once) ..."
+      _PASS_TMP="$(mktemp /dev/shm/luks-auth.XXXXXX)"
+      chmod 600 "$_PASS_TMP"
+      # Trap ensures the passphrase file is always removed.
+      trap 'rm -f "$_PASS_TMP"' EXIT INT TERM
+      printf 'Enter an existing LUKS passphrase to authorize: ' >&2
+      stty -echo 2>/dev/null || true
+      IFS= read -r _auth_pass
+      stty echo 2>/dev/null || true
+      printf '\n' >&2
+      printf '%s' "$_auth_pass" > "$_PASS_TMP"
+      unset _auth_pass
+      cryptsetup luksKillSlot  --key-file "$_PASS_TMP" "$LUKS_DEVICE" "$KEYSLOT"
+      cryptsetup luksAddKey    --new-key-slot "$KEYSLOT" --key-file "$_PASS_TMP" \
+        "$LUKS_DEVICE" "$PLAIN_KEY"
+      rm -f "$_PASS_TMP"
+      trap - EXIT INT TERM
+      echo "Slot $KEYSLOT replaced successfully."
+    else
+      echo "Enrolling key into slot $KEYSLOT on $LUKS_DEVICE ..."
+      cryptsetup luksAddKey --new-key-slot "$KEYSLOT" "$LUKS_DEVICE" "$PLAIN_KEY"
+      echo "Key successfully enrolled in slot $KEYSLOT."
+    fi
+  fi
+fi
+
+if [ "$TOKEN_MODE" -eq 1 ]; then
+  import_luks2_gpg_token "$LUKS_DEVICE" "$KEYSLOT" "$TOKEN_ID" "$RECIPIENT" "$OUTPUT_PATH" "$FORCE"
+  echo "Imported LUKS2 token type 'root-gpg' on $LUKS_DEVICE"
+  echo "Use crypttab field 3 value: none"
+  print_crypttab_guidance "none" "luks" "LUKS2 token"
+else
+  if [ "$DELETE_OUTPUT" -eq 1 ]; then
+    echo "gpg-cryptenroll: no persistent encrypted key file retained; no file-based crypttab guidance to print." >&2
+  else
+    print_crypttab_guidance "$OUTPUT_PATH" "luks,keyscript=decrypt_gnupg-sc" "file-based"
+  fi
+fi
+
+if [ "$DELETE_OUTPUT" -eq 1 ]; then
+  rm -f "$OUTPUT_PATH"
+  echo "Temporary encrypted key file removed: $OUTPUT_PATH"
+fi
+
+if [ "$KEEP_PLAINTEXT" -eq 1 ]; then
+  echo "Plaintext key retained (--keep-plaintext): $PLAIN_KEY"
+  echo "It will be removed on reboot."
+else
+  rm -f "$PLAIN_KEY"
+  rmdir "$TMP_DIR" 2>/dev/null || true
+  echo "Temporary plaintext key removed from tmpfs."
+fi
+
+if [ "$DELETE_OUTPUT" -eq 0 ] && [ "$TOKEN_MODE" -eq 0 ]; then
+  WARN_TARGET="$(resolve_crypttab_name_for_device "$LUKS_DEVICE" || true)"
+  [ -n "$WARN_TARGET" ] || WARN_TARGET="$(basename "$LUKS_DEVICE")"
+cat >&2 <<NOTE
+
+NOTE: When you run update-initramfs you will see:
+
+  cryptsetup: WARNING: Skipping root target $WARN_TARGET: uses a key file
+
+This is expected. Debian's cryptsetup hook skips entries that have an
+explicit key file; our own hook (smartcard-root) copies the
+encrypted key file into the initramfs instead. The device will unlock
+normally via the smartcard at boot.
+NOTE
+fi
+
+cat >&2 <<'NOTE'
+
+Example: rebuild initramfs for the running kernel:
+
+  update-initramfs -u -k "$(uname -r)"
+NOTE

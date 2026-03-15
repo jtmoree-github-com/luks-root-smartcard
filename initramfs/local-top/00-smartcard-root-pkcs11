@@ -1,0 +1,344 @@
+#!/bin/sh
+set -eu
+
+PREREQ=""
+
+prereqs() {
+  echo "$PREREQ"
+}
+
+case "${1:-}" in
+  prereqs)
+    prereqs
+    exit 0
+    ;;
+esac
+
+. /scripts/functions
+
+DEBUG_ENABLED=0
+for _dbg_tok in $(cat /proc/cmdline 2>/dev/null); do
+  case "$_dbg_tok" in
+    rd.debug*) DEBUG_ENABLED=1; break ;;
+  esac
+done
+
+msg() { echo "smartcard-root-pkcs11: $*" >&2; }
+dbg() {
+  [ "$DEBUG_ENABLED" = "1" ] || return 0
+  echo "smartcard-root-pkcs11: DEBUG: $*" >&2
+}
+
+# Early exit if crypttab field 3 is a key file rather than 'none'.
+# We only handle the PKCS#11 token (none / systemd-pkcs11:) workflow.
+# Exiting here avoids any hardware interaction, leaving stock keyscript=
+# handling completely undisturbed.
+_early_keyspec=""
+if [ -r /cryptroot/crypttab ]; then
+  _early_mapper=""
+  for _tok in $(cat /proc/cmdline 2>/dev/null); do
+    case "$_tok" in root=/dev/mapper/*) _early_mapper="${_tok#root=/dev/mapper/}" ;; esac
+  done
+  while IFS= read -r _early_line; do
+    case "$_early_line" in ''|'#'*) continue ;; esac
+    set -- $_early_line
+    [ "$#" -ge 3 ] || continue
+    if [ -z "$_early_mapper" ] || [ "$1" = "$_early_mapper" ]; then
+      _early_keyspec="$3"; break
+    fi
+  done </cryptroot/crypttab
+fi
+case "${_early_keyspec:-none}" in
+  none|systemd-pkcs11:*) ;;
+  *)
+    dbg "key spec ${_early_keyspec} is not a PKCS#11 token entry; exiting"
+    exit 0
+    ;;
+esac
+
+get_root_mapper_name() {
+  for tok in $(cat /proc/cmdline); do
+    case "$tok" in
+      root=/dev/mapper/*) echo "${tok#root=/dev/mapper/}"; return 0 ;;
+    esac
+  done
+  echo ""
+}
+
+resolve_mapping() {
+  preferred_target="$1"
+  found_target=""
+  found_source=""
+  found_key=""
+
+  [ -r /cryptroot/crypttab ] || panic "smartcard-root-pkcs11: /cryptroot/crypttab missing"
+
+  while IFS= read -r line; do
+    case "$line" in ''|'#'*) continue ;; esac
+    set -- $line
+    [ "$#" -ge 3 ] || continue
+    if [ -n "$preferred_target" ]; then
+      [ "$1" = "$preferred_target" ] || continue
+    fi
+    if [ -z "$found_target" ]; then
+      found_target="$1"; found_source="$2"; found_key="$3"
+      [ -n "$preferred_target" ] && break
+    fi
+  done </cryptroot/crypttab
+
+  [ -n "$found_target" ] || panic "smartcard-root-pkcs11: no usable mapping found in /cryptroot/crypttab"
+  printf '%s|%s|%s\n' "$found_target" "$found_source" "$found_key"
+}
+
+resolve_device() {
+  case "$1" in
+    UUID=*)     blkid -U "${1#UUID=}" 2>/dev/null ;;
+    LABEL=*)    blkid -L "${1#LABEL=}" 2>/dev/null ;;
+    PARTUUID=*) echo "/dev/disk/by-partuuid/${1#PARTUUID=}" ;;
+    PARTLABEL=*) echo "/dev/disk/by-partlabel/${1#PARTLABEL=}" ;;
+    *)          echo "$1" ;;
+  esac
+}
+
+json_value() {
+  _jv_json="$1"
+  _jv_key="$2"
+  _jv_flat="$(printf '%s' "$_jv_json" | tr -d '\n')"
+  _jv_after="${_jv_flat#*\"${_jv_key}\":\"}"
+  [ "$_jv_after" != "$_jv_flat" ] || return 1
+  _jv_val="${_jv_after%%\"*}"
+  printf '%s' "$_jv_val"
+}
+
+extract_token_blob() {
+  _dev="$1"
+  _selector="$2"
+  _token_id="${_selector#*:}"
+  _b64=""
+
+  if [ "$_token_id" = "auto" ]; then
+    _i=0
+    while [ "$_i" -lt 32 ]; do
+      _json="$(cryptsetup token export --token-id "$_i" "$_dev" 2>/dev/null || true)"
+      if [ -n "$_json" ]; then
+        _t="$(json_value "$_json" "type" || true)"
+        if [ "$_t" = "systemd-pkcs11" ]; then
+          _b64="$(json_value "$_json" "pkcs11-key" || true)"
+          [ -n "$_b64" ] && break
+        fi
+      fi
+      _i=$(( _i + 1 ))
+    done
+  else
+    _json="$(cryptsetup token export --token-id "$_token_id" "$_dev" 2>/dev/null || true)"
+    if [ -n "$_json" ]; then
+      _t="$(json_value "$_json" "type" || true)"
+      if [ "$_t" = "systemd-pkcs11" ]; then
+        _b64="$(json_value "$_json" "pkcs11-key" || true)"
+      fi
+    fi
+  fi
+
+  [ -n "$_b64" ] || return 1
+
+  _tmp="$(mktemp /run/smartcard-blob.XXXXXX)"
+  if ! printf '%s\n' "$_b64" | base64 -d >"$_tmp" 2>/dev/null; then
+    _b64f="$(mktemp /run/smartcard-b64.XXXXXX)"
+    printf '%s\n' "$_b64" >"$_b64f"
+    if ! base64 -d <"$_b64f" >"$_tmp" 2>/dev/null; then
+      if ! openssl base64 -d -in "$_b64f" -out "$_tmp" 2>/dev/null; then
+        rm -f "$_tmp" "$_b64f"
+        return 1
+      fi
+    fi
+    rm -f "$_b64f"
+  fi
+  chmod 600 "$_tmp"
+  echo "$_tmp"
+}
+
+decrypt_pkcs11() {
+  # Kill scdaemon again in case the GPG script restarted it
+  if command -v gpgconf >/dev/null 2>&1; then
+    gpgconf --kill scdaemon 2>/dev/null || true
+  fi
+  pkcs11-tool --decrypt \
+    --mechanism RSA-PKCS \
+    --login \
+    --input-file "$1" \
+    --output-file "$2" 2>&1
+}
+
+start_pcscd() {
+  command -v pcscd >/dev/null 2>&1 || return 1
+  if ! pidof pcscd >/dev/null 2>&1; then
+    msg "starting pcscd (foreground, no polkit)"
+    mkdir -p /run/pcscd
+    /usr/sbin/pcscd --foreground --disable-polkit 2>/run/pcscd-stderr.log &
+    echo $! >/run/pcscd.pid
+    _w=0
+    while [ "$_w" -lt 3 ]; do
+      sleep 1
+      _w=$(( _w + 1 ))
+      if ! kill -0 "$(cat /run/pcscd.pid)" 2>/dev/null; then
+        dbg "pcscd exited during startup; stderr:"
+        if [ "$DEBUG_ENABLED" = "1" ]; then
+          sed 's/^/  pcscd: /' /run/pcscd-stderr.log >&2 2>/dev/null || true
+        fi
+        return 1
+      fi
+      [ -e /run/pcscd/pcscd.comm ] && break
+    done
+  fi
+  return 0
+}
+
+check_smartcard() {
+  start_pcscd
+  # scdaemon (GPG) grabs exclusive access to the reader, blocking pkcs11-tool.
+  # Kill it so OpenSC can talk to the card.
+  if command -v gpgconf >/dev/null 2>&1; then
+    gpgconf --kill scdaemon 2>/dev/null || true
+  fi
+  # --list-token-slots only lists slots with a token (card) actually present.
+  # It exits non-zero and produces no output when no card is inserted.
+  if command -v pkcs11-tool >/dev/null 2>&1; then
+    if pkcs11-tool --list-token-slots >/dev/null 2>&1; then
+      return 0
+    fi
+  fi
+  return 1
+}
+
+prompt_skip_or_wait() {
+  if [ -f /run/smartcard-skip-requested ]; then
+    return 0
+  fi
+
+  echo "No SmartCard detected for PKCS#11 flow. Skip SmartCard and continue with passphrase fallback? [Y/n]" >&2
+  read ANSWER
+  case "${ANSWER:-Y}" in
+    y|Y|"")
+      : >/run/smartcard-skip-requested
+      return 0
+      ;;
+    *)
+      msg "Please insert SmartCard..."
+      until check_smartcard; do sleep 2; done
+      return 1
+      ;;
+  esac
+}
+
+auto_detect_pkcs11_token() {
+  _dev="$1"
+  _i=0
+  while [ "$_i" -lt 32 ]; do
+    _json="$(cryptsetup token export --token-id "$_i" "$_dev" 2>/dev/null || true)"
+    if [ -n "$_json" ]; then
+      _t="$(json_value "$_json" "type" || true)"
+      dbg "token $_i type=${_t:-unknown}"
+      if [ "$_t" = "systemd-pkcs11" ]; then
+        echo "systemd-pkcs11:$_i"
+        return 0
+      fi
+    fi
+    _i=$(( _i + 1 ))
+  done
+  return 1
+}
+
+mapping="$(resolve_mapping "$(get_root_mapper_name)")"
+CRYPTROOT_NAME="${mapping%%|*}"
+rest="${mapping#*|}"
+CRYPTROOT_SOURCE="${rest%%|*}"
+KEY_SPEC="${rest#*|}"
+
+dbg "mapping name=$CRYPTROOT_NAME source=$CRYPTROOT_SOURCE key-spec=${KEY_SPEC:-<empty>}"
+
+if cryptsetup status "$CRYPTROOT_NAME" >/dev/null 2>&1; then
+  dbg "mapping $CRYPTROOT_NAME already active"
+  exit 0
+fi
+
+[ -n "$KEY_SPEC" ] || KEY_SPEC="none"
+
+DEV="$(resolve_device "$CRYPTROOT_SOURCE")" || panic "smartcard-root-pkcs11: cannot resolve device $CRYPTROOT_SOURCE"
+[ -b "$DEV" ] || panic "smartcard-root-pkcs11: $DEV is not a block device"
+dbg "resolved backing device: $DEV"
+
+# Only handle PKCS#11 workflow selections in this script.
+if [ "$KEY_SPEC" = "none" ]; then
+  dbg "crypttab field 3 is none; scanning tokens for systemd-pkcs11"
+  KEY_SPEC="$(auto_detect_pkcs11_token "$DEV" || true)"
+  if [ -z "$KEY_SPEC" ]; then
+    dbg "no systemd-pkcs11 token found; leaving PKCS#11 path"
+    exit 0
+  fi
+  msg "auto-detected token selector: $KEY_SPEC"
+elif [ "${KEY_SPEC#systemd-pkcs11:}" != "$KEY_SPEC" ]; then
+  dbg "explicit PKCS#11 selector requested: $KEY_SPEC"
+  :
+else
+  dbg "key spec $KEY_SPEC does not belong to PKCS#11 path; exiting"
+  exit 0
+fi
+
+CARD_FOUND=false
+for _try in 1 2 3; do
+  dbg "card detection attempt $_try/3"
+  if check_smartcard; then
+    CARD_FOUND=true
+    dbg "pkcs11-tool detected a token-present slot"
+    break
+  fi
+  msg "smartcard not detected (attempt $_try/3), waiting for hardware..."
+  sleep 2
+done
+
+if [ "$CARD_FOUND" = false ]; then
+  if prompt_skip_or_wait; then
+    msg "skipping PKCS#11 smartcard flow; continuing to standard cryptroot fallback"
+    exit 0
+  fi
+fi
+
+TMP_KEY="$(mktemp /run/smartcard-key.XXXXXX)"
+chmod 600 "$TMP_KEY"
+unlock_ok=false
+
+BLOB="$(extract_token_blob "$DEV" "$KEY_SPEC" || true)"
+if [ -z "$BLOB" ]; then
+  dbg "failed to extract pkcs11-key blob from token selector $KEY_SPEC"
+elif decrypt_pkcs11 "$BLOB" "$TMP_KEY"; then
+  dbg "pkcs11-tool decrypt succeeded; converting plaintext to base64 for luksOpen"
+  TMP_B64="$(mktemp /run/smartcard-b64key.XXXXXX)"
+  chmod 600 "$TMP_B64"
+  base64 -w0 < "$TMP_KEY" > "$TMP_B64"
+  rm -f "$TMP_KEY"
+  TMP_KEY="$TMP_B64"
+
+  if cryptsetup luksOpen "$DEV" "$CRYPTROOT_NAME" --key-file "$TMP_KEY"; then
+    unlock_ok=true
+    dbg "cryptsetup luksOpen succeeded via PKCS#11"
+  else
+    dbg "cryptsetup luksOpen failed after successful PKCS#11 decrypt"
+  fi
+else
+  dbg "pkcs11-tool decrypt failed for selector $KEY_SPEC"
+fi
+
+rm -f "$TMP_KEY" "${BLOB:-}"
+
+if [ "$unlock_ok" = true ]; then
+  exit 0
+fi
+
+msg "PKCS#11 decrypt failed"
+if prompt_skip_or_wait; then
+  msg "bypassing PKCS#11 smartcard; continuing to standard cryptroot fallback"
+  exit 0
+fi
+# user chose to retry — loop not implemented, fall through
+msg "PKCS#11 flow did not unlock root; continuing to standard cryptroot fallback"
+exit 0

@@ -1,0 +1,137 @@
+#!/bin/sh
+
+# PKCS#11 workflow hook for luks-root-smartcard.
+# Copies assets needed by the systemd-pkcs11 decrypt path only.
+
+set -e
+
+PREREQ="cryptroot"
+
+prereqs()
+{
+    echo "$PREREQ"
+}
+
+case "$1" in
+    prereqs)
+        prereqs
+        exit 0
+        ;;
+esac
+
+. /usr/share/initramfs-tools/hook-functions
+
+# Only activate for crypttab entries that use the PKCS#11 token workflow.
+# If every entry uses a key file, do nothing — adding pcscd to the initramfs
+# would break stock scdaemon for keyscript= setups.
+_resolve_dev_hook() {
+    case "$1" in
+        UUID=*)      blkid -U "${1#UUID=}" 2>/dev/null ;;
+        LABEL=*)     blkid -L "${1#LABEL=}" 2>/dev/null ;;
+        PARTUUID=*)  echo "/dev/disk/by-partuuid/${1#PARTUUID=}" ;;
+        PARTLABEL=*) echo "/dev/disk/by-partlabel/${1#PARTLABEL=}" ;;
+        *)           echo "$1" ;;
+    esac
+}
+
+_has_systemd_pkcs11_token() {
+    _hdev="$1"
+    _hi=0
+    while [ "$_hi" -lt 32 ]; do
+        _hjson="$(cryptsetup token export --token-id "$_hi" "$_hdev" 2>/dev/null || true)"
+        if [ -n "$_hjson" ] && printf '%s' "$_hjson" | grep -q '"type":"systemd-pkcs11"'; then
+            return 0
+        fi
+        _hi=$(( _hi + 1 ))
+    done
+    return 1
+}
+
+_using_pkcs11_token=false
+_crypttab="${TABFILE:-/etc/crypttab}"
+if [ -f "$_crypttab" ]; then
+    while IFS= read -r _ctline; do
+        case "$_ctline" in ''|'#'*) continue ;; esac
+        set -- $_ctline
+        [ "$#" -ge 3 ] || continue
+        case "$3" in
+            systemd-pkcs11:*)
+                _using_pkcs11_token=true
+                break
+                ;;
+            none)
+                _hdev="$(_resolve_dev_hook "$2" 2>/dev/null || true)"
+                if [ -b "$_hdev" ]; then
+                    if _has_systemd_pkcs11_token "$_hdev"; then
+                        _using_pkcs11_token=true
+                        break
+                    fi
+                else
+                    # Cannot resolve device at build time: include conservatively.
+                    _using_pkcs11_token=true
+                    break
+                fi
+                ;;
+        esac
+    done < "$_crypttab"
+fi
+if [ "$_using_pkcs11_token" = false ]; then
+    exit 0
+fi
+
+RV=0
+
+if [ -x /usr/bin/base64 ]; then
+    copy_exec /usr/bin/base64
+fi
+if [ -x /usr/bin/openssl ]; then
+    copy_exec /usr/bin/openssl
+fi
+
+if [ -x /usr/bin/pkcs11-tool ]; then
+    copy_exec /usr/bin/pkcs11-tool
+else
+    echo "WARNING: pkcs11-tool not found, PKCS#11 token unlock will not work" >&2
+fi
+
+# OpenSC module is loaded by pkcs11-tool via dlopen(3), so copy it explicitly.
+for mod in \
+    /usr/lib/*/opensc-pkcs11.so \
+    /usr/lib/pkcs11/opensc-pkcs11.so \
+    /usr/lib64/pkcs11/opensc-pkcs11.so; do
+    [ -f "$mod" ] && copy_exec "$mod"
+done
+
+# OpenSC runtime data/config (drivers, ATR map, defaults).
+[ -d /usr/share/opensc ] && cp -a /usr/share/opensc "$DESTDIR/usr/share/" 2>/dev/null || true
+for cfg in /etc/opensc.conf /etc/opensc; do
+    [ -e "$cfg" ] && cp -a "$cfg" "$DESTDIR/etc/" 2>/dev/null || true
+done
+
+if [ -x /usr/sbin/pcscd ]; then
+    copy_exec /usr/sbin/pcscd
+
+    mkdir -p -- "$DESTDIR/usr/lib/pcsc"
+    cp -rt "$DESTDIR/usr/lib" /usr/lib/pcsc
+
+    cp -t "$DESTDIR/etc" /etc/reader.conf 2>/dev/null || true
+    if [ -d /etc/reader.conf.d ]; then
+        cp -rt "$DESTDIR/etc" /etc/reader.conf.d
+    fi
+    cp -t "$DESTDIR/etc" /etc/libccid_Info.plist 2>/dev/null || true
+
+    for so in $(ldconfig -p | sed -nr 's/^\s*(libusb-[0-9.-]+|libpcsclite(_real)?)\s*\.so\.[0-9]+\s.*=>\s*//p'); do
+        [ -f "$so" ] && copy_exec "$so"
+    done
+
+    for real in "$DESTDIR"/usr/lib/*/libpcsclite_real.so.1; do
+        [ -f "$real" ] || continue
+        _dir="$(dirname "$real")"
+        for wrapper in "$_dir"/libpcsclite.so.1*; do
+            [ -f "$wrapper" ] || continue
+            cp -fL "$real" "$wrapper"
+        done
+    done
+fi
+
+exit $RV

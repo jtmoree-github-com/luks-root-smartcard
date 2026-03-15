@@ -1,0 +1,29 @@
+#!/bin/sh
+
+PREREQ=""
+
+prereqs() {
+    echo "$PREREQ"
+}
+
+case $1 in
+    prereqs)
+        prereqs
+        exit 0
+        ;;
+esac
+
+# Kill GPG daemons started during smartcard decrypt
+if [ -x /usr/bin/gpgconf ] && [ -d "/cryptroot/gnupghome" ]; then
+    gpgconf --homedir="/cryptroot/gnupghome" --kill all 2>/dev/null || true
+fi
+
+# Kill pcscd if it was started for pkcs11-tool
+if PID="$(cat /run/pcscd.pid 2>/dev/null)" &&
+        [ "$(readlink -f "/proc/$PID/exe")" = "/usr/sbin/pcscd" ]; then
+    kill -TERM "$PID" 2>/dev/null || true
+fi
+rm -f /run/pcscd.pid
+
+# Clean up any leftover key material
+rm -f /run/smartcard-blob.* /run/smartcard-key.*

@@ -1,0 +1,377 @@
+#!/bin/sh
+set -eu
+
+PREREQ=""
+
+prereqs() {
+  echo "$PREREQ"
+}
+
+case "${1:-}" in
+  prereqs)
+    prereqs
+    exit 0
+    ;;
+esac
+
+. /scripts/functions
+
+DEBUG_ENABLED=0
+for _dbg_tok in $(cat /proc/cmdline 2>/dev/null); do
+  case "$_dbg_tok" in
+    rd.debug*) DEBUG_ENABLED=1; break ;;
+  esac
+done
+
+msg() { echo "smartcard-root-gpg: $*" >&2; }
+dbg() {
+  [ "$DEBUG_ENABLED" = "1" ] || return 0
+  echo "smartcard-root-gpg: DEBUG: $*" >&2
+}
+
+# Early exit if crypttab field 3 is not 'none'.
+# We only handle the GPG token workflow when field 3 is 'none'; the token
+# is then discovered automatically by scanning the LUKS2 header.
+# Exiting here avoids starting pcscd or touching any hardware, leaving
+# stock keyscript= handling (e.g. decrypt_gnupg-sc) completely undisturbed.
+_early_keyspec=""
+if [ -r /cryptroot/crypttab ]; then
+  _early_mapper=""
+  for _tok in $(cat /proc/cmdline 2>/dev/null); do
+    case "$_tok" in root=/dev/mapper/*) _early_mapper="${_tok#root=/dev/mapper/}" ;; esac
+  done
+  while IFS= read -r _early_line; do
+    case "$_early_line" in ''|'#'*) continue ;; esac
+    set -- $_early_line
+    [ "$#" -ge 3 ] || continue
+    if [ -z "$_early_mapper" ] || [ "$1" = "$_early_mapper" ]; then
+      _early_keyspec="$3"; break
+    fi
+  done </cryptroot/crypttab
+fi
+case "${_early_keyspec:-none}" in
+  none) ;;
+  *)
+    dbg "key spec ${_early_keyspec} is not 'none'; exiting GPG token path"
+    exit 0
+    ;;
+esac
+
+# Set GNUPGHOME so all gpg calls (card-status, decrypt, etc.) use it.
+# gpg --card-status auto-creates secret-key stubs when a matching pubkey exists.
+if [ -d "/cryptroot/gnupghome" ]; then
+  export GNUPGHOME="/cryptroot/gnupghome"
+fi
+
+get_root_mapper_name() {
+  for tok in $(cat /proc/cmdline); do
+    case "$tok" in root=/dev/mapper/*) echo "${tok#root=/dev/mapper/}"; return 0 ;; esac
+  done
+  echo ""
+}
+
+resolve_mapping() {
+  preferred_target="$1"
+  found_target=""
+  found_source=""
+  found_key=""
+
+  [ -r /cryptroot/crypttab ] || panic "smartcard-root-gpg: /cryptroot/crypttab missing"
+
+  while IFS= read -r line; do
+    case "$line" in ''|'#'*) continue ;; esac
+    set -- $line
+    [ "$#" -ge 3 ] || continue
+    if [ -n "$preferred_target" ]; then
+      [ "$1" = "$preferred_target" ] || continue
+    fi
+    if [ -z "$found_target" ]; then
+      found_target="$1"; found_source="$2"; found_key="$3"
+      [ -n "$preferred_target" ] && break
+    fi
+  done </cryptroot/crypttab
+
+  [ -n "$found_target" ] || panic "smartcard-root-gpg: no usable mapping found in /cryptroot/crypttab"
+  printf '%s|%s|%s\n' "$found_target" "$found_source" "$found_key"
+}
+
+resolve_device() {
+  case "$1" in
+    UUID=*)     blkid -U "${1#UUID=}" 2>/dev/null ;;
+    LABEL=*)    blkid -L "${1#LABEL=}" 2>/dev/null ;;
+    PARTUUID=*) echo "/dev/disk/by-partuuid/${1#PARTUUID=}" ;;
+    PARTLABEL=*) echo "/dev/disk/by-partlabel/${1#PARTLABEL=}" ;;
+    *)          echo "$1" ;;
+  esac
+}
+
+json_value() {
+  _jv_json="$1"
+  _jv_key="$2"
+  _jv_flat="$(printf '%s' "$_jv_json" | tr -d '\n')"
+  _jv_after="${_jv_flat#*\"${_jv_key}\":\"}"
+  [ "$_jv_after" != "$_jv_flat" ] || return 1
+  _jv_val="${_jv_after%%\"*}"
+  printf '%s' "$_jv_val"
+}
+
+extract_token_blob() {
+  _dev="$1"
+  _selector="$2"
+  _token_id="${_selector#*:}"
+  _b64=""
+
+  if [ "$_token_id" = "auto" ]; then
+    _i=0
+    while [ "$_i" -lt 32 ]; do
+      _json="$(cryptsetup token export --token-id "$_i" "$_dev" 2>/dev/null || true)"
+      if [ -n "$_json" ]; then
+        _t="$(json_value "$_json" "type" || true)"
+        if [ "$_t" = "root-gpg" ]; then
+          _b64="$(json_value "$_json" "gpg-key" || true)"
+          [ -n "$_b64" ] && break
+        fi
+      fi
+      _i=$(( _i + 1 ))
+    done
+  else
+    _json="$(cryptsetup token export --token-id "$_token_id" "$_dev" 2>/dev/null || true)"
+    if [ -n "$_json" ]; then
+      _t="$(json_value "$_json" "type" || true)"
+      if [ "$_t" = "root-gpg" ]; then
+        _b64="$(json_value "$_json" "gpg-key" || true)"
+      fi
+    fi
+  fi
+
+  [ -n "$_b64" ] || return 1
+
+  _tmp="$(mktemp /run/smartcard-blob.XXXXXX)"
+  if ! printf '%s\n' "$_b64" | base64 -d >"$_tmp" 2>/dev/null; then
+    _b64f="$(mktemp /run/smartcard-b64.XXXXXX)"
+    printf '%s\n' "$_b64" >"$_b64f"
+    if ! base64 -d <"$_b64f" >"$_tmp" 2>/dev/null; then
+      if ! openssl base64 -d -in "$_b64f" -out "$_tmp" 2>/dev/null; then
+        rm -f "$_tmp" "$_b64f"
+        return 1
+      fi
+    fi
+    rm -f "$_b64f"
+  fi
+  chmod 600 "$_tmp"
+  echo "$_tmp"
+}
+
+decrypt_gpg() {
+  if ! GPG_TTY="$(tty 2>/dev/null)"; then
+    read _console _rest </proc/consoles
+    GPG_TTY="/dev/$_console"
+  fi
+  export GPG_TTY
+
+  gpg --no-options --trust-model=always --decrypt -- "$1" >"$2"
+}
+
+check_smartcard() {
+  if command -v gpg >/dev/null 2>&1; then
+    _card_status_log="$(mktemp /run/gpg-card-status.XXXXXX)"
+    if gpg --no-options --trust-model=always --batch --no-tty --card-status >"$_card_status_log" 2>&1; then
+      dbg "gpg --card-status succeeded"
+      if [ "$DEBUG_ENABLED" = "1" ]; then
+        sed 's/^/smartcard-root-gpg: DEBUG: card-status: /' "$_card_status_log" >&2
+      fi
+      rm -f "$_card_status_log"
+      return 0
+    fi
+    dbg "gpg --card-status failed"
+    if [ "$DEBUG_ENABLED" = "1" ]; then
+      sed 's/^/smartcard-root-gpg: DEBUG: card-status: /' "$_card_status_log" >&2
+    fi
+    rm -f "$_card_status_log"
+  else
+    dbg "gpg command not present in initramfs environment"
+  fi
+  return 1
+}
+
+prompt_skip_or_wait() {
+  if [ -f /run/smartcard-skip-requested ]; then
+    return 0
+  fi
+
+  echo "No SmartCard detected for GPG flow. Skip SmartCard and continue with passphrase fallback? [Y/n]" >&2
+  read ANSWER
+  case "${ANSWER:-Y}" in
+    y|Y|"")
+      : >/run/smartcard-skip-requested
+      return 0
+      ;;
+    *)
+      msg "Please insert SmartCard..."
+      until check_smartcard; do sleep 2; done
+      return 1
+      ;;
+  esac
+}
+
+auto_detect_gpg_token() {
+  _dev="$1"
+  _i=0
+  while [ "$_i" -lt 32 ]; do
+    _json="$(cryptsetup token export --token-id "$_i" "$_dev" 2>/dev/null || true)"
+    if [ -n "$_json" ]; then
+      _t="$(json_value "$_json" "type" || true)"
+      dbg "token $_i type=${_t:-unknown}"
+      if [ "$_t" = "root-gpg" ]; then
+        echo "root-gpg:$_i"
+        return 0
+      fi
+    fi
+    _i=$(( _i + 1 ))
+  done
+  return 1
+}
+
+mapping="$(resolve_mapping "$(get_root_mapper_name)")"
+CRYPTROOT_NAME="${mapping%%|*}"
+rest="${mapping#*|}"
+CRYPTROOT_SOURCE="${rest%%|*}"
+KEY_SPEC="${rest#*|}"
+
+dbg "mapping name=$CRYPTROOT_NAME source=$CRYPTROOT_SOURCE key-spec=${KEY_SPEC:-<empty>}"
+
+if cryptsetup status "$CRYPTROOT_NAME" >/dev/null 2>&1; then
+  dbg "mapping $CRYPTROOT_NAME already active"
+  exit 0
+fi
+
+[ -n "$KEY_SPEC" ] || KEY_SPEC="none"
+
+DEV="$(resolve_device "$CRYPTROOT_SOURCE")" || panic "smartcard-root-gpg: cannot resolve device $CRYPTROOT_SOURCE"
+[ -b "$DEV" ] || panic "smartcard-root-gpg: $DEV is not a block device"
+dbg "resolved backing device: $DEV"
+
+# Only handle GPG workflow selections in this script.
+if [ "$KEY_SPEC" = "none" ]; then
+  dbg "crypttab field 3 is none; scanning tokens for root-gpg"
+  KEY_SPEC="$(auto_detect_gpg_token "$DEV" || true)"
+  if [ -z "$KEY_SPEC" ]; then
+    dbg "no GPG token found; leaving GPG path"
+    exit 0
+  fi
+  msg "auto-detected token selector: $KEY_SPEC"
+elif [ "${KEY_SPEC#root-gpg:}" != "$KEY_SPEC" ]; then
+  # Internal auto-detected selector from auto_detect_gpg_token above.
+  dbg "using auto-detected token selector: $KEY_SPEC"
+  :
+elif [ "${KEY_SPEC#systemd-pkcs11:}" != "$KEY_SPEC" ]; then
+  dbg "key spec belongs to PKCS#11 path; exiting GPG path"
+  exit 0
+else
+  # File-based GPG keys are handled by stock cryptroot with
+  # keyscript=decrypt_gnupg-sc — not by this script.
+  dbg "key spec $KEY_SPEC not handled by GPG token path; exiting"
+  exit 0
+fi
+
+if [ -n "${GNUPGHOME:-}" ]; then
+  dbg "GNUPGHOME=$GNUPGHOME"
+  if gpg --no-options --batch --with-keygrip --list-secret-keys >/dev/null 2>&1; then
+    dbg "gpg secret-key stubs are present in initramfs GNUPGHOME"
+  else
+    dbg "gpg secret-key listing failed or no secret-key stubs yet (card-status will create them)"
+  fi
+else
+  dbg "GNUPGHOME not set (/cryptroot/gnupghome missing)"
+fi
+
+# Card detection strategy:
+# 1. Try without pcscd first — scdaemon has a built-in CCID driver and uses it
+#    when pcscd is absent.  This is the same path stock decrypt_gnupg-sc uses
+#    and works reliably on Debian/Ubuntu for most readers (including Librem Key).
+# 2. If that fails, start pcscd and retry — some configurations require it.
+
+start_pcscd() {
+  command -v pcscd >/dev/null 2>&1 || return 1
+  pidof pcscd >/dev/null 2>&1 && return 0
+  dbg "starting pcscd"
+  mkdir -p /run/pcscd
+  /usr/sbin/pcscd --foreground --disable-polkit 2>/run/pcscd-stderr.log &
+  echo $! >/run/pcscd.pid
+  _w=0
+  while [ "$_w" -lt 3 ]; do
+    sleep 1; _w=$(( _w + 1 ))
+    kill -0 "$(cat /run/pcscd.pid)" 2>/dev/null || {
+      dbg "pcscd exited (after ${_w}s); stderr:"
+      if [ "$DEBUG_ENABLED" = "1" ]; then
+        sed 's/^/  pcscd: /' /run/pcscd-stderr.log >&2 2>/dev/null || true
+      fi
+      return 1
+    }
+    [ -e /run/pcscd/pcscd.comm ] && { dbg "pcscd socket ready"; return 0; }
+  done
+  dbg "pcscd running (pid $(cat /run/pcscd.pid))"
+  return 0
+}
+
+CARD_FOUND=false
+for _try in 1 2 3; do
+  dbg "card detection attempt $_try/3"
+  if check_smartcard; then
+    CARD_FOUND=true
+    break
+  fi
+  # After first failure try pcscd before sleeping.
+  if [ "$_try" = "1" ] && ! pidof pcscd >/dev/null 2>&1; then
+    msg "smartcard not detected via internal CCID; starting pcscd and retrying..."
+    start_pcscd || true
+    gpgconf --kill scdaemon 2>/dev/null || true
+    continue
+  fi
+  msg "smartcard not detected (attempt $_try/3), waiting for hardware..."
+  # Kill scdaemon between retries so it re-probes USB on next card-status
+  gpgconf --kill scdaemon 2>/dev/null || true
+  sleep 3
+done
+
+if [ "$CARD_FOUND" = false ]; then
+  if prompt_skip_or_wait; then
+    msg "skipping GPG smartcard flow; continuing to standard cryptroot fallback"
+    exit 0
+  fi
+fi
+
+TMP_KEY="$(mktemp /run/smartcard-key.XXXXXX)"
+chmod 600 "$TMP_KEY"
+unlock_ok=false
+
+BLOB="$(extract_token_blob "$DEV" "$KEY_SPEC" || true)"
+if [ -z "$BLOB" ]; then
+  dbg "failed to extract gpg-key blob from token selector $KEY_SPEC"
+elif decrypt_gpg "$BLOB" "$TMP_KEY"; then
+  dbg "gpg token decrypt succeeded"
+  if cryptsetup luksOpen "$DEV" "$CRYPTROOT_NAME" --key-file "$TMP_KEY"; then
+    unlock_ok=true
+    dbg "cryptsetup luksOpen succeeded via GPG token"
+  else
+    dbg "cryptsetup luksOpen failed after successful GPG token decrypt"
+  fi
+else
+  dbg "gpg token decrypt failed for selector $KEY_SPEC"
+fi
+rm -f "${BLOB:-}"
+
+rm -f "$TMP_KEY"
+
+if [ "$unlock_ok" = true ]; then
+  exit 0
+fi
+
+msg "GPG decrypt failed"
+if prompt_skip_or_wait; then
+  msg "bypassing GPG smartcard; continuing to standard cryptroot fallback"
+  exit 0
+fi
+# user chose to retry — loop not implemented, fall through
+msg "GPG flow did not unlock root; continuing to standard cryptroot fallback"
+exit 0

@@ -1,0 +1,15 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+  configure)
+    echo "luks-root-smartcard-tools installed."
+    echo "Split workflows installed: PKCS#11 and GPG local-top scripts both run at boot."
+    echo "No /etc/crypttab field 3 change is required for token auto-detect mode."
+    echo "Initramfs is not rebuilt automatically."
+    echo "Rebuild initramfs when you are ready (run as root):"
+    echo "  update-initramfs -u -k $(uname -r)"
+    ;;
+esac
+
+exit 0

@@ -1,0 +1,194 @@
+#!/bin/sh
+
+# GPG workflow hook for luks-root-smartcard.
+# Copies assets needed by the GPG decrypt path only.
+
+set -e
+
+PREREQ="cryptroot"
+
+prereqs()
+{
+    echo "$PREREQ"
+}
+
+case "$1" in
+    prereqs)
+        prereqs
+        exit 0
+        ;;
+esac
+
+. /usr/share/initramfs-tools/hook-functions
+
+# Only activate for crypttab entries that use the GPG token workflow.
+# If every entry uses a key file (e.g. keyscript=decrypt_gnupg-sc with a
+# .gpg file path), our hook must do nothing — adding pcscd to the initramfs
+# would break stock scdaemon, which works via its internal CCID driver when
+# pcscd is absent.
+#
+# For entries with field 3 = 'none', we cannot tell from crypttab alone
+# whether this is a stock keyscript setup or a LUKS2 GPG token setup.
+# We resolve the backing device and scan its LUKS2 token slots.  If a
+# root-gpg token is present, we include all GPG/pcscd assets.
+# If the device cannot be resolved, we include them as a safe fallback.
+#
+# Note: 'root-gpg:N' and 'luks2-gpg:N' are NOT supported as crypttab
+# field 3 values.  Use 'none' — the token is discovered automatically.
+
+_resolve_dev_hook() {
+    case "$1" in
+        UUID=*)      blkid -U "${1#UUID=}" 2>/dev/null ;;
+        LABEL=*)     blkid -L "${1#LABEL=}" 2>/dev/null ;;
+        PARTUUID=*)  echo "/dev/disk/by-partuuid/${1#PARTUUID=}" ;;
+        PARTLABEL=*) echo "/dev/disk/by-partlabel/${1#PARTLABEL=}" ;;
+        *)           echo "$1" ;;
+    esac
+}
+
+_has_root_gpg_token() {
+    _hdev="$1"
+    _hi=0
+    while [ "$_hi" -lt 32 ]; do
+        _hjson="$(cryptsetup token export --token-id "$_hi" "$_hdev" 2>/dev/null || true)"
+        if [ -n "$_hjson" ] && printf '%s' "$_hjson" | grep -q '"type":"root-gpg"'; then
+            return 0
+        fi
+        _hi=$(( _hi + 1 ))
+    done
+    return 1
+}
+
+_using_gpg_token=false
+_crypttab="${TABFILE:-/etc/crypttab}"
+if [ -f "$_crypttab" ]; then
+    while IFS= read -r _ctline; do
+        case "$_ctline" in ''|'#'*) continue ;; esac
+        set -- $_ctline
+        [ "$#" -ge 3 ] || continue
+        case "$3" in
+            none)
+                # Resolve the backing device and check for a root-gpg token.
+                # If the device is inaccessible, include assets as a safe fallback.
+                # (Any other field 3 value is a key file — not our workflow.)
+                _hdev="$(_resolve_dev_hook "$2" 2>/dev/null || true)"
+                if [ -b "$_hdev" ]; then
+                    if _has_root_gpg_token "$_hdev"; then
+                        _using_gpg_token=true
+                        break
+                    fi
+                    # Device accessible but no root-gpg token — not our workflow.
+                else
+                    # Cannot resolve device; include assets conservatively.
+                    _using_gpg_token=true
+                    break
+                fi
+                ;;
+        esac
+    done < "$_crypttab"
+fi
+if [ "$_using_gpg_token" = false ]; then
+    exit 0
+fi
+
+RV=0
+
+if [ -x /usr/bin/base64 ]; then
+    copy_exec /usr/bin/base64
+fi
+if [ -x /usr/bin/openssl ]; then
+    copy_exec /usr/bin/openssl
+fi
+
+# Copy key files referenced in crypttab.
+if [ -f /lib/cryptsetup/functions ]; then
+    . /lib/cryptsetup/functions
+    copy_keys() {
+        crypttab_parse_options
+        _key_prefix="${CRYPTTAB_KEY%%:*}"
+        case "$CRYPTTAB_KEY" in
+            none)
+                ;;
+            *)
+                case "$_key_prefix" in
+                    systemd-pkcs11)
+                        ;;
+                    *)
+                        if [ -f "$CRYPTTAB_KEY" ]; then
+                            [ -f "$DESTDIR$CRYPTTAB_KEY" ] || copy_file keyfile "$CRYPTTAB_KEY" || RV=$?
+                        fi
+                        ;;
+                esac
+                ;;
+        esac
+    }
+    [ -f "${TABFILE:-}" ] && crypttab_foreach_entry copy_keys
+fi
+
+# pcscd + reader drivers: on Debian/Ubuntu scdaemon talks to the card
+# via pcscd (not a built-in CCID driver).  This also provides pcscd for
+# stock decrypt_gnupg-sc when our script exits without handling the entry.
+if [ -x /usr/sbin/pcscd ]; then
+    copy_exec /usr/sbin/pcscd
+
+    mkdir -p -- "$DESTDIR/usr/lib/pcsc"
+    cp -rt "$DESTDIR/usr/lib" /usr/lib/pcsc
+
+    cp -t "$DESTDIR/etc" /etc/reader.conf 2>/dev/null || true
+    if [ -d /etc/reader.conf.d ]; then
+        cp -rt "$DESTDIR/etc" /etc/reader.conf.d
+    fi
+    cp -t "$DESTDIR/etc" /etc/libccid_Info.plist 2>/dev/null || true
+
+    for so in $(ldconfig -p | sed -nr 's/^\s*(libusb-[0-9.-]+|libpcsclite(_real)?)\s*\.so\.[0-9]+\s.*=>\s*//p'); do
+        [ -f "$so" ] && copy_exec "$so"
+    done
+
+    for real in "$DESTDIR"/usr/lib/*/libpcsclite_real.so.1; do
+        [ -f "$real" ] || continue
+        _dir="$(dirname "$real")"
+        for wrapper in "$_dir"/libpcsclite.so.1*; do
+            [ -f "$wrapper" ] || continue
+            cp -fL "$real" "$wrapper"
+        done
+    done
+fi
+
+copy_exec /usr/bin/gpg
+copy_exec /usr/bin/gpg-agent
+copy_exec /usr/lib/gnupg/scdaemon
+copy_exec /usr/bin/gpgconf
+copy_exec /usr/bin/gpg-connect-agent
+
+PUBRING="/etc/cryptsetup-initramfs/pubring.gpg"
+if [ -f "$PUBRING" ]; then
+    [ -d "$DESTDIR/cryptroot/gnupghome" ] || mkdir -pm0700 "$DESTDIR/cryptroot/gnupghome"
+    /usr/bin/gpg --no-options --no-autostart --trust-model=always \
+        --quiet --batch --no-tty --logger-file=/dev/null \
+        --homedir="$DESTDIR/cryptroot/gnupghome" --import <"$PUBRING"
+    find "$DESTDIR/cryptroot" -name "*~" -type f -delete
+fi
+
+if [ ! -x "$DESTDIR/usr/bin/pinentry" ]; then
+    if [ -x "/usr/bin/pinentry-curses" ]; then
+        pinentry="/usr/bin/pinentry-curses"
+    elif [ -x "/usr/bin/pinentry-tty" ]; then
+        pinentry="/usr/bin/pinentry-tty"
+    else
+        echo "WARNING: missing pinentry-curses or pinentry-tty" >&2
+        RV=1
+    fi
+    if [ -n "${pinentry:-}" ]; then
+        copy_exec "$pinentry"
+        ln -s "$pinentry" "$DESTDIR/usr/bin/pinentry"
+    fi
+fi
+
+for d in "/usr/share/terminfo" "/lib/terminfo"; do
+    if [ -f "$d/l/linux" ]; then
+        [ -f "$DESTDIR$d/l/linux" ] || copy_file terminfo "$d/l/linux" || RV=$?
+        break
+    fi
+done
+
+exit $RV

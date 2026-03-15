@@ -1,0 +1,16 @@
+Source: luks-root-smartcard-tools
+Section: admin
+Priority: optional
+Maintainer: JT <jtmoree@users.noreply.github.com>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.7.0
+Rules-Requires-Root: no
+Homepage: https://github.com/jtmoree-github-com/luks-root-smartcard
+
+Package: luks-root-smartcard-tools
+Architecture: all
+Depends: ${misc:Depends}, cryptsetup-initramfs, initramfs-tools, gnupg, opensc, pcscd
+Description: Smartcard-based LUKS root unlock for Debian/Ubuntu
+ Provides an initramfs hook and boot script that decrypt the root volume
+ key on a smartcard (pkcs11-tool or GPG/scdaemon) without requiring
+ systemd libraries in the initrd.
