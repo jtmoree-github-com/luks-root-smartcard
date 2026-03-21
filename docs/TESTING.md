@@ -7,6 +7,7 @@ Automated test scripts:
 - `scripts/test-gpg-file-chain.sh`
 - `scripts/test-gpg-token-chain.sh`
 - `scripts/test-pkcs11-chain.sh`
+- `scripts/test-tpm2-chain.sh`
 
 ## PKCS#11 chain test
 
@@ -56,6 +57,29 @@ workflow tested by `test-gpg-token-chain.sh`).
 
 Run as root (`sudo`) with the actual smartcard inserted.
 Cleanup (loopback device, temp files) is automatic on exit.
+
+## TPM2 chain test
+
+`scripts/test-tpm2-chain.sh` runs the full TPM2 chain end-to-end
+using a loopback LUKS2 device and the local TPM2 chip:
+
+```bash
+sudo ./scripts/test-tpm2-chain.sh [--pcrs <list>] [--pcr-bank <bank>]
+```
+
+Defaults are `--pcrs 7 --pcr-bank sha256`.
+
+The test:
+
+1. Creates a temporary LUKS2 loopback volume.
+2. Enrolls TPM2 with `systemd-cryptenroll --tpm2-*`.
+3. Exports the `systemd-tpm2` LUKS2 token.
+4. Reconstructs the TPM object (`tpm2-blob` split into public/private).
+5. Calls `tpm2_unseal` with the same PCR policy semantics as boot.
+6. Verifies unlock via `cryptsetup luksOpen`.
+
+Requires a working TPM2 device (`/dev/tpmrm0` or `/dev/tpm0`) and
+`tpm2-tools` installed.
 
 # manual tests
 

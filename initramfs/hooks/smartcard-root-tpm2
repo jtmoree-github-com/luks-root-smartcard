@@ -1,0 +1,109 @@
+#!/bin/sh
+
+# TPM2 workflow hook for luks-root-smartcard.
+# Copies assets needed by the systemd-tpm2 decrypt path only.
+
+set -e
+
+PREREQ="cryptroot"
+
+prereqs()
+{
+    echo "$PREREQ"
+}
+
+case "$1" in
+    prereqs)
+        prereqs
+        exit 0
+        ;;
+esac
+
+. /usr/share/initramfs-tools/hook-functions
+
+# Only activate when at least one crypttab entry has a systemd-tpm2 LUKS2 token.
+# If no TPM2 tokens are found (or device can't be resolved to check), do nothing.
+
+_resolve_dev_hook() {
+    case "$1" in
+        UUID=*)      blkid -U "${1#UUID=}" 2>/dev/null ;;
+        LABEL=*)     blkid -L "${1#LABEL=}" 2>/dev/null ;;
+        PARTUUID=*)  echo "/dev/disk/by-partuuid/${1#PARTUUID=}" ;;
+        PARTLABEL=*) echo "/dev/disk/by-partlabel/${1#PARTLABEL=}" ;;
+        *)           echo "$1" ;;
+    esac
+}
+
+_has_systemd_tpm2_token() {
+    _hdev="$1"
+    _hi=0
+    while [ "$_hi" -lt 32 ]; do
+        _hjson="$(cryptsetup token export --token-id "$_hi" "$_hdev" 2>/dev/null || true)"
+        if [ -n "$_hjson" ] && printf '%s' "$_hjson" | grep -q '"type":"systemd-tpm2"'; then
+            return 0
+        fi
+        _hi=$(( _hi + 1 ))
+    done
+    return 1
+}
+
+_using_tpm2_token=false
+_crypttab="${TABFILE:-/etc/crypttab}"
+if [ -f "$_crypttab" ]; then
+    while IFS= read -r _ctline; do
+        case "$_ctline" in ''|'#'*) continue ;; esac
+        set -- $_ctline
+        [ "$#" -ge 3 ] || continue
+        case "$3" in
+            none)
+                _hdev="$(_resolve_dev_hook "$2" 2>/dev/null || true)"
+                if [ -b "$_hdev" ]; then
+                    if _has_systemd_tpm2_token "$_hdev"; then
+                        _using_tpm2_token=true
+                        break
+                    fi
+                    # Device accessible but no systemd-tpm2 token — not our workflow.
+                else
+                    # Cannot resolve device at build time: include conservatively.
+                    _using_tpm2_token=true
+                    break
+                fi
+                ;;
+        esac
+    done < "$_crypttab"
+fi
+
+if [ "$_using_tpm2_token" = false ]; then
+    exit 0
+fi
+
+RV=0
+
+# tpm2-tools: copy only the binaries needed for the unseal flow.
+# copy_exec resolves and copies linked shared libraries automatically.
+for _bin in \
+    /usr/bin/tpm2_createprimary \
+    /usr/bin/tpm2_load \
+    /usr/bin/tpm2_unseal \
+    /usr/bin/tpm2_flushcontext \
+    /usr/bin/tpm2_readpublic; do
+    if [ -x "$_bin" ]; then
+        copy_exec "$_bin"
+    else
+        echo "WARNING: $_bin not found; TPM2 token unlock may not work" >&2
+        RV=1
+    fi
+done
+
+# libtss2-tcti-device is dlopen'd at runtime by the TCTI loader (libtss2-tctildr)
+# so it does not appear in ldd output and must be copied explicitly.
+for _so in $(ldconfig -p | sed -nr 's/^\s*libtss2-tcti-device\.so\.[0-9].*=>\s*//p'); do
+    [ -f "$_so" ] && copy_exec "$_so"
+done
+
+# TPM2 kernel modules (for hardware TPM chips; built-in on many platforms).
+for _mod in tpm_tis tpm_crb tpm_tis_spi; do
+    manual_add_modules "$_mod" 2>/dev/null || true
+done
+
+exit $RV

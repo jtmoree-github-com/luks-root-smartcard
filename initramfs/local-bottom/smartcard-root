@@ -27,3 +27,9 @@ rm -f /run/pcscd.pid
 
 # Clean up any leftover key material
 rm -f /run/smartcard-blob.* /run/smartcard-key.*
+
+# Flush any lingering TPM2 transient handles and clean up temp dirs
+if command -v tpm2_flushcontext >/dev/null 2>&1; then
+    tpm2_flushcontext -t >/dev/null 2>&1 || true
+fi
+rm -rf /run/tpm2.*

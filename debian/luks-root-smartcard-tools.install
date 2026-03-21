@@ -1,6 +1,8 @@
 initramfs/hooks/smartcard-root-gpg usr/share/initramfs-tools/hooks/
 initramfs/hooks/smartcard-root-pkcs11 usr/share/initramfs-tools/hooks/
+initramfs/hooks/smartcard-root-tpm2 usr/share/initramfs-tools/hooks/
 initramfs/local-top/00-smartcard-root-gpg usr/share/initramfs-tools/scripts/local-top/
 initramfs/local-top/00-smartcard-root-pkcs11 usr/share/initramfs-tools/scripts/local-top/
+initramfs/local-top/00-smartcard-root-tpm2 usr/share/initramfs-tools/scripts/local-top/
 initramfs/local-bottom/smartcard-root usr/share/initramfs-tools/scripts/local-bottom/
 scripts/gpg-cryptenroll usr/sbin/
