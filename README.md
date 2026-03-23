@@ -13,9 +13,9 @@ Smartcard integration with root LUKS drives can be complex.  This script assists
 
 At boot, separate `local-top` scripts handle each workflow:
 
-1. Reads `/etc/crypttab` to find the root mapping and key spec.
+1. Reads `/etc/crypttab` to find the root mapping/device.
 2. `00-smartcard-root-pkcs11` handles PKCS#11 tokens found in the LUKS2 header.
-3. `00-smartcard-root-gpg` handles `root-gpg` tokens or GPG keyfile paths.
+3. `00-smartcard-root-gpg` handles `root-gpg` tokens found in the LUKS2 header.
 4. Both scripts run at boot; each script attempts only its own workflow.
 5. The selected script detects card/token, decrypts key material, and opens root.
 6. Falls back to passphrase prompt if card decrypt fails.
@@ -48,9 +48,9 @@ At boot, separate `local-top` scripts handle each workflow:
 
 ## crypttab setup
 
-Stock Debian/Ubuntu use field 3 in crypttab to specify a keyfile. If a keyfile is present in field 3 both scripts do nothing and allow stock OS behavior.
+Field 3 in crypttab can still be used for stock keyfile workflows. Token workflows in this package are now token-driven: the scripts inspect the root LUKS2 header and run whenever matching tokens are present.
 
-To activate the features supported by these tools set field 3 to `none`.  Each workflow auto-detects its own token type from the luks2 header.
+Recommended token-mode entry remains `none` for field 3:
 
 GPG key file workflow (stock):
 
@@ -64,13 +64,26 @@ GPG token and pkcs11 workflow:
 root_crypt UUID=<uuid> none luks
 ```
 
+## Smartcard expectation trigger
+
+Interactive smartcard expectation is controlled by token presence on the root LUKS2 device:
+
+- If a `root-gpg` token exists, GPG smartcard handling runs.
+- If a `systemd-pkcs11` token exists, PKCS#11 smartcard handling runs.
+- If no matching token exists for a workflow, that workflow exits quietly (no smartcard prompt).
+
+When a matching token exists but no smartcard is detected, the user is prompted to either:
+
+- insert the smartcard and continue token unlock, or
+- bypass smartcard and fall back to passphrase unlock.
+
 ## Quick start (systemd-pkcs11)
 
 ```bash
 # Enroll the smartcard (prompts for LUKS passphrase and card PIN)
 sudo systemd-cryptenroll --pkcs11-token-uri="auto" /dev/<luks-device>
 
-# Set crypttab field 3 to none
+# Recommended: set crypttab field 3 to none for token mode
 # (edit /etc/crypttab so the line reads: <name> UUID=<uuid> none luks)
 
 # Rebuild initramfs
@@ -90,7 +103,7 @@ sudo gpg-cryptenroll token:auto /dev/<root-luks-device> --recipient auto --keysl
 # Export your public key for the initramfs
 gpg --export <recipient> >/etc/cryptsetup-initramfs/pubring.gpg
 
-# Set crypttab field 3 to none
+# Recommended: set crypttab field 3 to none for token mode
 # (edit /etc/crypttab so the line reads: <name> UUID=<uuid> none luks)
 
 # Rebuild initramfs

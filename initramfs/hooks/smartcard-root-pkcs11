@@ -21,9 +21,9 @@ esac
 
 . /usr/share/initramfs-tools/hook-functions
 
-# Only activate for crypttab entries that use the PKCS#11 token workflow.
-# If every entry uses a key file, do nothing — adding pcscd to the initramfs
-# would break stock scdaemon for keyscript= setups.
+# Token-driven activation: for each crypttab entry, resolve the backing device
+# and scan its LUKS2 header for a systemd-pkcs11 token. If found, include
+# assets. If a device cannot be resolved at build time, include conservatively.
 _resolve_dev_hook() {
     case "$1" in
         UUID=*)      blkid -U "${1#UUID=}" 2>/dev/null ;;
@@ -53,26 +53,17 @@ if [ -f "$_crypttab" ]; then
     while IFS= read -r _ctline; do
         case "$_ctline" in ''|'#'*) continue ;; esac
         set -- $_ctline
-        [ "$#" -ge 3 ] || continue
-        case "$3" in
-            systemd-pkcs11:*)
+        [ "$#" -ge 2 ] || continue
+        _hdev="$(_resolve_dev_hook "$2" 2>/dev/null || true)"
+        if [ -b "$_hdev" ]; then
+            if _has_systemd_pkcs11_token "$_hdev"; then
                 _using_pkcs11_token=true
                 break
-                ;;
-            none)
-                _hdev="$(_resolve_dev_hook "$2" 2>/dev/null || true)"
-                if [ -b "$_hdev" ]; then
-                    if _has_systemd_pkcs11_token "$_hdev"; then
-                        _using_pkcs11_token=true
-                        break
-                    fi
-                else
-                    # Cannot resolve device at build time: include conservatively.
-                    _using_pkcs11_token=true
-                    break
-                fi
-                ;;
-        esac
+            fi
+        else
+            _using_pkcs11_token=true
+            break
+        fi
     done < "$_crypttab"
 fi
 if [ "$_using_pkcs11_token" = false ]; then

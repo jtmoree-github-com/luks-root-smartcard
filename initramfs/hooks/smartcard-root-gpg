@@ -21,20 +21,9 @@ esac
 
 . /usr/share/initramfs-tools/hook-functions
 
-# Only activate for crypttab entries that use the GPG token workflow.
-# If every entry uses a key file (e.g. keyscript=decrypt_gnupg-sc with a
-# .gpg file path), our hook must do nothing — adding pcscd to the initramfs
-# would break stock scdaemon, which works via its internal CCID driver when
-# pcscd is absent.
-#
-# For entries with field 3 = 'none', we cannot tell from crypttab alone
-# whether this is a stock keyscript setup or a LUKS2 GPG token setup.
-# We resolve the backing device and scan its LUKS2 token slots.  If a
-# root-gpg token is present, we include all GPG/pcscd assets.
-# If the device cannot be resolved, we include them as a safe fallback.
-#
-# Note: 'root-gpg:N' and 'luks2-gpg:N' are NOT supported as crypttab
-# field 3 values.  Use 'none' — the token is discovered automatically.
+# Token-driven activation: for each crypttab entry, resolve the backing device
+# and scan its LUKS2 header for a root-gpg token. If found, include assets.
+# If a device cannot be resolved at build time, include assets conservatively.
 
 _resolve_dev_hook() {
     case "$1" in
@@ -65,26 +54,17 @@ if [ -f "$_crypttab" ]; then
     while IFS= read -r _ctline; do
         case "$_ctline" in ''|'#'*) continue ;; esac
         set -- $_ctline
-        [ "$#" -ge 3 ] || continue
-        case "$3" in
-            none)
-                # Resolve the backing device and check for a root-gpg token.
-                # If the device is inaccessible, include assets as a safe fallback.
-                # (Any other field 3 value is a key file — not our workflow.)
-                _hdev="$(_resolve_dev_hook "$2" 2>/dev/null || true)"
-                if [ -b "$_hdev" ]; then
-                    if _has_root_gpg_token "$_hdev"; then
-                        _using_gpg_token=true
-                        break
-                    fi
-                    # Device accessible but no root-gpg token — not our workflow.
-                else
-                    # Cannot resolve device; include assets conservatively.
-                    _using_gpg_token=true
-                    break
-                fi
-                ;;
-        esac
+        [ "$#" -ge 2 ] || continue
+        _hdev="$(_resolve_dev_hook "$2" 2>/dev/null || true)"
+        if [ -b "$_hdev" ]; then
+            if _has_root_gpg_token "$_hdev"; then
+                _using_gpg_token=true
+                break
+            fi
+        else
+            _using_gpg_token=true
+            break
+        fi
     done < "$_crypttab"
 fi
 if [ "$_using_gpg_token" = false ]; then

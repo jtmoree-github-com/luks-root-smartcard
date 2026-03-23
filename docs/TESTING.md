@@ -37,6 +37,16 @@ that the boot script uses.
 `--recipient` is optional; if omitted, `gpg-cryptenroll` auto-detects the key
 from the smartcard.
 
+Boot-time expectation behavior for token unlock is token-driven:
+
+- `root-gpg` token present in the root LUKS2 header: GPG smartcard flow runs.
+- `systemd-pkcs11` token present in the root LUKS2 header: PKCS#11 flow runs.
+- no matching token present: workflow exits quietly (no smartcard prompt).
+
+If a matching token is present but smartcard hardware is missing, initramfs
+prompts the user to either wait/insert card or bypass and fall back to
+passphrase unlock.
+
 ## GPG file chain test
 
 `scripts/test-gpg-file-chain.sh` validates the file-based GPG workflow end-to-end.
@@ -73,8 +83,9 @@ each scenario.
 
 ## luks-root-smartcard
 
-These tests require updates to crypttab. Specifically, remove keyscript and use
-`none` for field 3.
+For token workflow tests, remove keyscript and use `none` for field 3.
+(`none` is recommended for token mode; token detection itself comes from the
+LUKS2 header.)
 
 1. gpg-cryptenroll file workflow decrypts with smartcard.
 1. gpg-cryptenroll file workflow falls back to passphrase.

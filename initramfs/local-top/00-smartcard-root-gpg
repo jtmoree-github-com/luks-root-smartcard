@@ -29,33 +29,9 @@ dbg() {
   echo "smartcard-root-gpg: DEBUG: $*" >&2
 }
 
-# Early exit if crypttab field 3 is not 'none'.
-# We only handle the GPG token workflow when field 3 is 'none'; the token
-# is then discovered automatically by scanning the LUKS2 header.
-# Exiting here avoids starting pcscd or touching any hardware, leaving
-# stock keyscript= handling (e.g. decrypt_gnupg-sc) completely undisturbed.
-_early_keyspec=""
-if [ -r /cryptroot/crypttab ]; then
-  _early_mapper=""
-  for _tok in $(cat /proc/cmdline 2>/dev/null); do
-    case "$_tok" in root=/dev/mapper/*) _early_mapper="${_tok#root=/dev/mapper/}" ;; esac
-  done
-  while IFS= read -r _early_line; do
-    case "$_early_line" in ''|'#'*) continue ;; esac
-    set -- $_early_line
-    [ "$#" -ge 3 ] || continue
-    if [ -z "$_early_mapper" ] || [ "$1" = "$_early_mapper" ]; then
-      _early_keyspec="$3"; break
-    fi
-  done </cryptroot/crypttab
-fi
-case "${_early_keyspec:-none}" in
-  none) ;;
-  *)
-    dbg "key spec ${_early_keyspec} is not 'none'; exiting GPG token path"
-    exit 0
-    ;;
-esac
+# This script is token-driven: it scans the root LUKS2 header for root-gpg
+# tokens and only activates smartcard handling when such a token is present.
+# If no root-gpg token exists, it exits without prompting.
 
 # Set GNUPGHOME so all gpg calls (card-status, decrypt, etc.) use it.
 # gpg --card-status auto-creates secret-key stubs when a matching pubkey exists.
@@ -208,7 +184,7 @@ prompt_skip_or_wait() {
       ;;
     *)
       msg "Please insert SmartCard..."
-      until check_smartcard; do sleep 2; done
+	      until check_smartcard; do sleep 5; done
       return 1
       ;;
   esac
@@ -245,34 +221,19 @@ if cryptsetup status "$CRYPTROOT_NAME" >/dev/null 2>&1; then
   exit 0
 fi
 
-[ -n "$KEY_SPEC" ] || KEY_SPEC="none"
-
 DEV="$(resolve_device "$CRYPTROOT_SOURCE")" || panic "smartcard-root-gpg: cannot resolve device $CRYPTROOT_SOURCE"
 [ -b "$DEV" ] || panic "smartcard-root-gpg: $DEV is not a block device"
 dbg "resolved backing device: $DEV"
 
-# Only handle GPG workflow selections in this script.
-if [ "$KEY_SPEC" = "none" ]; then
-  dbg "crypttab field 3 is none; scanning tokens for root-gpg"
-  KEY_SPEC="$(auto_detect_gpg_token "$DEV" || true)"
-  if [ -z "$KEY_SPEC" ]; then
-    dbg "no GPG token found; leaving GPG path"
-    exit 0
-  fi
-  msg "auto-detected token selector: $KEY_SPEC"
-elif [ "${KEY_SPEC#root-gpg:}" != "$KEY_SPEC" ]; then
-  # Internal auto-detected selector from auto_detect_gpg_token above.
-  dbg "using auto-detected token selector: $KEY_SPEC"
-  :
-elif [ "${KEY_SPEC#systemd-pkcs11:}" != "$KEY_SPEC" ]; then
-  dbg "key spec belongs to PKCS#11 path; exiting GPG path"
-  exit 0
-else
-  # File-based GPG keys are handled by stock cryptroot with
-  # keyscript=decrypt_gnupg-sc — not by this script.
-  dbg "key spec $KEY_SPEC not handled by GPG token path; exiting"
+# Always detect from the LUKS2 header so custom handling runs whenever a
+# root-gpg token exists on the root device.
+KEY_SPEC="$(auto_detect_gpg_token "$DEV" || true)"
+if [ -z "$KEY_SPEC" ]; then
+  dbg "no root-gpg token found on root device; exiting GPG token path"
   exit 0
 fi
+msg "auto-detected token selector: $KEY_SPEC"
+SMARTCARD_EXPECT="1"
 
 if [ -n "${GNUPGHOME:-}" ]; then
   dbg "GNUPGHOME=$GNUPGHOME"
@@ -315,28 +276,49 @@ start_pcscd() {
 }
 
 CARD_FOUND=false
-for _try in 1 2 3; do
-  dbg "card detection attempt $_try/3"
+if [ "$SMARTCARD_EXPECT" = "1" ]; then
+  dbg "smartcard expectation enabled (interactive mode)"
+  for _try in 1 2 3; do
+    dbg "card detection attempt $_try/3"
+    if check_smartcard; then
+      CARD_FOUND=true
+      break
+    fi
+    # After first failure try pcscd before sleeping.
+    if [ "$_try" = "1" ] && ! pidof pcscd >/dev/null 2>&1; then
+      msg "smartcard not detected via internal CCID; starting pcscd and retrying..."
+      start_pcscd || true
+      gpgconf --kill scdaemon 2>/dev/null || true
+      continue
+    fi
+    msg "smartcard not detected (attempt $_try/3), waiting for hardware..."
+    # Kill scdaemon between retries so it re-probes USB on next card-status
+    gpgconf --kill scdaemon 2>/dev/null || true
+    sleep 5
+  done
+
+  if [ "$CARD_FOUND" = false ]; then
+    if prompt_skip_or_wait; then
+      msg "skipping GPG smartcard flow; continuing to standard cryptroot fallback"
+      exit 0
+    fi
+  fi
+else
+  dbg "smartcard expectation disabled (non-interactive mode)"
   if check_smartcard; then
     CARD_FOUND=true
-    break
+  else
+    if ! pidof pcscd >/dev/null 2>&1; then
+      start_pcscd || true
+      gpgconf --kill scdaemon 2>/dev/null || true
+      if check_smartcard; then
+        CARD_FOUND=true
+      fi
+    fi
   fi
-  # After first failure try pcscd before sleeping.
-  if [ "$_try" = "1" ] && ! pidof pcscd >/dev/null 2>&1; then
-    msg "smartcard not detected via internal CCID; starting pcscd and retrying..."
-    start_pcscd || true
-    gpgconf --kill scdaemon 2>/dev/null || true
-    continue
-  fi
-  msg "smartcard not detected (attempt $_try/3), waiting for hardware..."
-  # Kill scdaemon between retries so it re-probes USB on next card-status
-  gpgconf --kill scdaemon 2>/dev/null || true
-  sleep 3
-done
 
-if [ "$CARD_FOUND" = false ]; then
-  if prompt_skip_or_wait; then
-    msg "skipping GPG smartcard flow; continuing to standard cryptroot fallback"
+  if [ "$CARD_FOUND" = false ]; then
+    msg "smartcard not detected and expectation trigger is disabled; continuing to standard cryptroot fallback"
     exit 0
   fi
 fi
@@ -368,10 +350,14 @@ if [ "$unlock_ok" = true ]; then
 fi
 
 msg "GPG decrypt failed"
-if prompt_skip_or_wait; then
-  msg "bypassing GPG smartcard; continuing to standard cryptroot fallback"
+if [ "$SMARTCARD_EXPECT" = "1" ]; then
+  if prompt_skip_or_wait; then
+    msg "bypassing GPG smartcard; continuing to standard cryptroot fallback"
+    exit 0
+  fi
+  # user chose to retry — loop not implemented, fall through
+  msg "GPG flow did not unlock root; continuing to standard cryptroot fallback"
   exit 0
 fi
-# user chose to retry — loop not implemented, fall through
-msg "GPG flow did not unlock root; continuing to standard cryptroot fallback"
+msg "GPG flow failed in non-interactive mode; continuing to standard cryptroot fallback"
 exit 0

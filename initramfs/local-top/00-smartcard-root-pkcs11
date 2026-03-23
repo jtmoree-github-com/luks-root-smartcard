@@ -29,32 +29,9 @@ dbg() {
   echo "smartcard-root-pkcs11: DEBUG: $*" >&2
 }
 
-# Early exit if crypttab field 3 is a key file rather than 'none'.
-# We only handle the PKCS#11 token (none / systemd-pkcs11:) workflow.
-# Exiting here avoids any hardware interaction, leaving stock keyscript=
-# handling completely undisturbed.
-_early_keyspec=""
-if [ -r /cryptroot/crypttab ]; then
-  _early_mapper=""
-  for _tok in $(cat /proc/cmdline 2>/dev/null); do
-    case "$_tok" in root=/dev/mapper/*) _early_mapper="${_tok#root=/dev/mapper/}" ;; esac
-  done
-  while IFS= read -r _early_line; do
-    case "$_early_line" in ''|'#'*) continue ;; esac
-    set -- $_early_line
-    [ "$#" -ge 3 ] || continue
-    if [ -z "$_early_mapper" ] || [ "$1" = "$_early_mapper" ]; then
-      _early_keyspec="$3"; break
-    fi
-  done </cryptroot/crypttab
-fi
-case "${_early_keyspec:-none}" in
-  none|systemd-pkcs11:*) ;;
-  *)
-    dbg "key spec ${_early_keyspec} is not a PKCS#11 token entry; exiting"
-    exit 0
-    ;;
-esac
+# This script is token-driven: it scans the root LUKS2 header for
+# systemd-pkcs11 tokens and only activates smartcard handling when present.
+# If no systemd-pkcs11 token exists, it exits without prompting.
 
 get_root_mapper_name() {
   for tok in $(cat /proc/cmdline); do
@@ -224,7 +201,7 @@ prompt_skip_or_wait() {
       ;;
     *)
       msg "Please insert SmartCard..."
-      until check_smartcard; do sleep 2; done
+	      until check_smartcard; do sleep 5; done
       return 1
       ;;
   esac
@@ -261,44 +238,48 @@ if cryptsetup status "$CRYPTROOT_NAME" >/dev/null 2>&1; then
   exit 0
 fi
 
-[ -n "$KEY_SPEC" ] || KEY_SPEC="none"
-
 DEV="$(resolve_device "$CRYPTROOT_SOURCE")" || panic "smartcard-root-pkcs11: cannot resolve device $CRYPTROOT_SOURCE"
 [ -b "$DEV" ] || panic "smartcard-root-pkcs11: $DEV is not a block device"
 dbg "resolved backing device: $DEV"
 
-# Only handle PKCS#11 workflow selections in this script.
-if [ "$KEY_SPEC" = "none" ]; then
-  dbg "crypttab field 3 is none; scanning tokens for systemd-pkcs11"
-  KEY_SPEC="$(auto_detect_pkcs11_token "$DEV" || true)"
-  if [ -z "$KEY_SPEC" ]; then
-    dbg "no systemd-pkcs11 token found; leaving PKCS#11 path"
-    exit 0
-  fi
-  msg "auto-detected token selector: $KEY_SPEC"
-elif [ "${KEY_SPEC#systemd-pkcs11:}" != "$KEY_SPEC" ]; then
-  dbg "explicit PKCS#11 selector requested: $KEY_SPEC"
-  :
-else
-  dbg "key spec $KEY_SPEC does not belong to PKCS#11 path; exiting"
+# Always detect from the LUKS2 header so custom handling runs whenever a
+# systemd-pkcs11 token exists on the root device.
+KEY_SPEC="$(auto_detect_pkcs11_token "$DEV" || true)"
+if [ -z "$KEY_SPEC" ]; then
+  dbg "no systemd-pkcs11 token found on root device; exiting PKCS#11 path"
   exit 0
 fi
+msg "auto-detected token selector: $KEY_SPEC"
+SMARTCARD_EXPECT="1"
 
 CARD_FOUND=false
-for _try in 1 2 3; do
-  dbg "card detection attempt $_try/3"
+if [ "$SMARTCARD_EXPECT" = "1" ]; then
+  dbg "smartcard expectation enabled (interactive mode)"
+  for _try in 1 2 3; do
+    dbg "card detection attempt $_try/3"
+    if check_smartcard; then
+      CARD_FOUND=true
+      dbg "pkcs11-tool detected a token-present slot"
+      break
+    fi
+    msg "smartcard not detected (attempt $_try/3), waiting for hardware..."
+	    sleep 5
+  done
+
+  if [ "$CARD_FOUND" = false ]; then
+    if prompt_skip_or_wait; then
+      msg "skipping PKCS#11 smartcard flow; continuing to standard cryptroot fallback"
+      exit 0
+    fi
+  fi
+else
+  dbg "smartcard expectation disabled (non-interactive mode)"
   if check_smartcard; then
     CARD_FOUND=true
-    dbg "pkcs11-tool detected a token-present slot"
-    break
   fi
-  msg "smartcard not detected (attempt $_try/3), waiting for hardware..."
-  sleep 2
-done
 
-if [ "$CARD_FOUND" = false ]; then
-  if prompt_skip_or_wait; then
-    msg "skipping PKCS#11 smartcard flow; continuing to standard cryptroot fallback"
+  if [ "$CARD_FOUND" = false ]; then
+    msg "smartcard not detected and expectation trigger is disabled; continuing to standard cryptroot fallback"
     exit 0
   fi
 fi
@@ -335,10 +316,14 @@ if [ "$unlock_ok" = true ]; then
 fi
 
 msg "PKCS#11 decrypt failed"
-if prompt_skip_or_wait; then
-  msg "bypassing PKCS#11 smartcard; continuing to standard cryptroot fallback"
+if [ "$SMARTCARD_EXPECT" = "1" ]; then
+  if prompt_skip_or_wait; then
+    msg "bypassing PKCS#11 smartcard; continuing to standard cryptroot fallback"
+    exit 0
+  fi
+  # user chose to retry — loop not implemented, fall through
+  msg "PKCS#11 flow did not unlock root; continuing to standard cryptroot fallback"
   exit 0
 fi
-# user chose to retry — loop not implemented, fall through
-msg "PKCS#11 flow did not unlock root; continuing to standard cryptroot fallback"
+msg "PKCS#11 flow failed in non-interactive mode; continuing to standard cryptroot fallback"
 exit 0
