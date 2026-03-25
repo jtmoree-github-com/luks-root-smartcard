@@ -1,4 +1,4 @@
-luks-root-smartcard-tools (1.0.14) unstable; urgency=medium
+luks-root-smartcard-tools (1.0.16) unstable; urgency=medium
 
   * dont wait for smartcard unless detecting paired tokens in luks header
   * fix waiting for smartcard if user chooses N for bypass prompt

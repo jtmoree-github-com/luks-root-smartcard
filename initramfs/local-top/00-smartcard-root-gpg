@@ -197,9 +197,12 @@ prompt_skip_or_wait() {
         # This is the same path as the initial detection attempt 1, which
         # succeeds when the card is present. pcscd in initramfs cannot detect
         # hot-plugged cards reliably; scdaemon's CCID driver can.
-        { kill "$(cat /run/pcscd.pid 2>/dev/null)" 2>/dev/null \
-            || pkill -x pcscd 2>/dev/null; } || true
-        rm -f /run/pcscd/pcscd.comm
+        if pidof pcscd >/dev/null 2>&1; then
+          for _pcscd_pid in $(pidof pcscd 2>/dev/null); do
+            kill "$_pcscd_pid" 2>/dev/null || true
+          done
+        fi
+        rm -f /run/pcscd.pid /run/pcscd/pcscd.comm
         if check_smartcard; then
           break
         fi

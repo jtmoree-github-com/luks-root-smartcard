@@ -210,9 +210,12 @@ prompt_skip_or_wait() {
         # inserted after it starts. Restart it every iteration so it
         # re-enumerates USB readers before pkcs11-tool talks to it.
         if command -v pcscd >/dev/null 2>&1; then
-          { kill "$(cat /run/pcscd.pid 2>/dev/null)" 2>/dev/null \
-              || pkill -x pcscd 2>/dev/null; } || true
-          rm -f /run/pcscd/pcscd.comm
+          if pidof pcscd >/dev/null 2>&1; then
+            for _pcscd_pid in $(pidof pcscd 2>/dev/null); do
+              kill "$_pcscd_pid" 2>/dev/null || true
+            done
+          fi
+          rm -f /run/pcscd.pid /run/pcscd/pcscd.comm
           sleep 1
           start_pcscd || true
         fi
@@ -223,6 +226,15 @@ prompt_skip_or_wait() {
       done
       return 1
       ;;
+  esac
+}
+
+prompt_retry_pkcs11_unlock() {
+  echo "Retry PKCS#11 smartcard unlock now? [y/N]" >&2
+  read ANSWER
+  case "${ANSWER:-N}" in
+    y|Y) return 0 ;;
+    *)   return 1 ;;
   esac
 }
 
@@ -342,8 +354,13 @@ while true; do
       msg "bypassing PKCS#11 smartcard; continuing to standard cryptroot fallback"
       exit 0
     fi
-    msg "smartcard detected; retrying PKCS#11 unlock"
-    continue
+    if prompt_retry_pkcs11_unlock; then
+      msg "user requested retry of PKCS#11 unlock"
+      continue
+    fi
+    rm -f "$TMP_KEY"
+    msg "not retrying PKCS#11 unlock; continuing to standard cryptroot fallback"
+    exit 0
   fi
 
   rm -f "$TMP_KEY"

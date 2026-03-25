@@ -18,12 +18,28 @@ if [ -x /usr/bin/gpgconf ] && [ -d "/cryptroot/gnupghome" ]; then
     gpgconf --homedir="/cryptroot/gnupghome" --kill all 2>/dev/null || true
 fi
 
-# Kill pcscd if it was started for pkcs11-tool
-if PID="$(cat /run/pcscd.pid 2>/dev/null)" &&
-        [ "$(readlink -f "/proc/$PID/exe")" = "/usr/sbin/pcscd" ]; then
+# Ensure no lingering smartcard-related daemons/processes survive into real root.
+kill_by_name() {
+    _name="$1"
+    if pidof "$_name" >/dev/null 2>&1; then
+        for _pid in $(pidof "$_name" 2>/dev/null); do
+            kill -TERM "$_pid" 2>/dev/null || true
+        done
+    fi
+}
+
+kill_by_name scdaemon
+kill_by_name gpg-agent
+kill_by_name pkcs11-tool
+
+# Kill pcscd started in initramfs. Prefer pidfile, then fall back to pkill.
+if PID="$(cat /run/pcscd.pid 2>/dev/null)"; then
     kill -TERM "$PID" 2>/dev/null || true
 fi
-rm -f /run/pcscd.pid
+kill_by_name pcscd
+
+# Remove initramfs runtime state so real-root daemons start cleanly.
+rm -f /run/pcscd.pid /run/pcscd/pcscd.comm /run/smartcard-skip-requested
 
 # Clean up any leftover key material
-rm -f /run/smartcard-blob.* /run/smartcard-key.*
+rm -f /run/smartcard-blob.* /run/smartcard-key.* /run/smartcard-b64key.* /run/gpg-card-status.*
