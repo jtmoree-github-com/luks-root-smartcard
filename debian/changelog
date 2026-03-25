@@ -1,4 +1,4 @@
-luks-root-smartcard-tools (1.0.23) unstable; urgency=medium
+luks-root-smartcard-tools (1.0.27) unstable; urgency=medium
 
   * support systemd-tpm2, systemd-fido2
   * remove wait loops before prompts

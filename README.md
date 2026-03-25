@@ -43,13 +43,13 @@ At boot, separate `local-top` scripts handle each workflow:
 
 ## Supported key types
 
-| Type | Storage | Decrypt method |
-|------|---------|----------------|
-| `systemd-pkcs11` | LUKS2 token (enrolled via `systemd-cryptenroll`) | `pkcs11-tool --decrypt --mechanism RSA-PKCS` + base64 |
-| `root-gpg` | LUKS2 token (enrolled via `gpg-cryptenroll`) | `gpg --decrypt` via scdaemon |
-| `systemd-fido2` | LUKS2 token (enrolled via `systemd-cryptenroll`) | `cryptsetup luksOpen --token-type systemd-fido2` |
-| `systemd-tpm2` | LUKS2 token (enrolled via `systemd-cryptenroll`) | `cryptsetup luksOpen --token-type systemd-tpm2` |
-| GPG key file | File path in crypttab field 3 | `gpg --decrypt` via scdaemon |
+| Type | Enroll Via | Decrypt method |
+|------|------------|----------------|
+| systemd-pkcs11 LUKS2 token | systemd-cryptenroll | `pkcs11-tool --decrypt --mechanism RSA-PKCS` + base64 |
+| systemd-fido2 LUKS2 token | systemd-cryptenroll | `cryptsetup luksOpen --token-type systemd-fido2` |
+| systemd-tpm2 LUKS2 token | systemd-cryptenroll | `cryptsetup luksOpen --token-type systemd-tpm2` |
+| root-gpg LUKS2 token | gpg-cryptenroll | `gpg --decrypt` via scdaemon |
+| GPG key file | gpg-cryptenroll | `gpg --decrypt` via scdaemon |
 
 ## Prerequisites
 

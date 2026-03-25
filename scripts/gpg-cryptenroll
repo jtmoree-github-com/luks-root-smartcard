@@ -48,6 +48,7 @@ TOKEN_ID="auto"
 OUTPUT_PATH=""
 DELETE_OUTPUT=0
 DEBUG=0
+ENROLLED_KEYSLOT=""
 
 dbg() { [ "$DEBUG" -eq 1 ] && echo "[debug] $*" >&2 || true; }
 
@@ -276,6 +277,27 @@ resolve_auto_recipient() {
   exit 1
 }
 
+list_enabled_keyslots() {
+  _dev="$1"
+  cryptsetup luksDump "$_dev" 2>/dev/null \
+    | awk '
+        /^Key Slot [0-9]+: ENABLED$/ {
+          s=$0
+          sub(/^Key Slot /, "", s)
+          sub(/: ENABLED$/, "", s)
+          print s
+          next
+        }
+        /^[[:space:]]*[0-9]+:[[:space:]]+luks/ {
+          s=$1
+          sub(/:$/, "", s)
+          print s
+          next
+        }
+      ' \
+    | awk 'NF && !seen[$0]++ { print }'
+}
+
 import_luks2_gpg_token() {
   _dev="$1"
   _slot="$2"
@@ -283,6 +305,7 @@ import_luks2_gpg_token() {
   _recipient="$4"
   _blob_path="$5"
   _force="$6"
+  _meta_keyslot="$7"
 
   cryptsetup isLuks "$_dev" 2>/dev/null || die "$_dev is not a LUKS device"
 
@@ -301,8 +324,12 @@ import_luks2_gpg_token() {
 
   _json_tmp="$(mktemp /dev/shm/root-gpg-token.XXXXXX.json)"
   chmod 600 "$_json_tmp"
+  _keyslots_json="[]"
+  case "$_meta_keyslot" in
+    [0-9]|[1-2][0-9]|3[0-1]) _keyslots_json='["'"$_meta_keyslot"'"]' ;;
+  esac
   cat >"$_json_tmp" <<EOF
-{"type":"root-gpg","keyslots":[],"gpg-recipient":"$_recipient","gpg-key":"$_blob_b64"}
+{"type":"root-gpg","keyslots":$_keyslots_json,"gpg-recipient":"$_recipient","gpg-key":"$_blob_b64"}
 EOF
 
   _token_args=""
@@ -508,7 +535,17 @@ if [ -n "$KEYSLOT" ]; then
 
   if [ "$KEYSLOT" = "auto" ]; then
     echo "Enrolling key into next available slot on $LUKS_DEVICE ..."
+    _slots_before_file="$(mktemp /dev/shm/luks-slots-before.XXXXXX)"
+    _slots_after_file="$(mktemp /dev/shm/luks-slots-after.XXXXXX)"
+    list_enabled_keyslots "$LUKS_DEVICE" >"$_slots_before_file" || true
     cryptsetup luksAddKey "$LUKS_DEVICE" "$PLAIN_KEY"
+    list_enabled_keyslots "$LUKS_DEVICE" >"$_slots_after_file" || true
+    ENROLLED_KEYSLOT="$(awk 'NR==FNR { have[$1]=1; next } !have[$1] { print; exit }' "$_slots_before_file" "$_slots_after_file")"
+    if [ -z "$ENROLLED_KEYSLOT" ]; then
+      ENROLLED_KEYSLOT="$(tail -n 1 "$_slots_after_file" 2>/dev/null || true)"
+    fi
+    rm -f "$_slots_before_file" "$_slots_after_file"
+    [ -n "$ENROLLED_KEYSLOT" ] && echo "Detected enrolled slot: $ENROLLED_KEYSLOT"
     echo "Key successfully enrolled."
   else
     # Check whether the requested slot is already occupied.
@@ -531,18 +568,22 @@ if [ -n "$KEYSLOT" ]; then
         "$LUKS_DEVICE" "$PLAIN_KEY"
       rm -f "$_PASS_TMP"
       trap - EXIT INT TERM
+      ENROLLED_KEYSLOT="$KEYSLOT"
       echo "Slot $KEYSLOT replaced successfully."
     else
       echo "Enrolling key into slot $KEYSLOT on $LUKS_DEVICE ..."
       cryptsetup luksAddKey --new-key-slot "$KEYSLOT" "$LUKS_DEVICE" "$PLAIN_KEY"
+      ENROLLED_KEYSLOT="$KEYSLOT"
       echo "Key successfully enrolled in slot $KEYSLOT."
     fi
   fi
 fi
 
 if [ "$TOKEN_MODE" -eq 1 ]; then
-  import_luks2_gpg_token "$LUKS_DEVICE" "$KEYSLOT" "$TOKEN_ID" "$RECIPIENT" "$OUTPUT_PATH" "$FORCE"
+  [ -n "$ENROLLED_KEYSLOT" ] || ENROLLED_KEYSLOT="$KEYSLOT"
+  import_luks2_gpg_token "$LUKS_DEVICE" "$KEYSLOT" "$TOKEN_ID" "$RECIPIENT" "$OUTPUT_PATH" "$FORCE" "$ENROLLED_KEYSLOT"
   echo "Imported LUKS2 token type 'root-gpg' on $LUKS_DEVICE"
+  echo "Token metadata: keyslots=[$ENROLLED_KEYSLOT] when resolvable (informational only)"
   echo "Use crypttab field 3 value: none"
   print_crypttab_guidance "none" "luks" "LUKS2 token"
 else

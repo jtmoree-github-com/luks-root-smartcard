@@ -123,6 +123,10 @@ ok "found token id $TOKEN_ID"
 TOKEN_TYPE="$(json_value "$TOKEN_JSON" "type")"
 ok "token type: $TOKEN_TYPE"
 
+TOKEN_KEYSLOT="$(printf '%s' "$TOKEN_JSON" | tr -d '\n' | sed -n 's/.*"keyslots"[[:space:]]*:[[:space:]]*\[[[:space:]]*"\{0,1\}\([0-9][0-9]*\)"\{0,1\}[[:space:]]*\].*/\1/p')"
+[ -n "$TOKEN_KEYSLOT" ] || die "keyslots field does not include an enrolled slot in root-gpg token JSON"
+ok "token metadata keyslots[0]: $TOKEN_KEYSLOT"
+
 echo ""
 echo "--- LUKS2 token dump (first 200 chars) ---"
 printf '%s\n' "$TOKEN_JSON" | head -c 200
