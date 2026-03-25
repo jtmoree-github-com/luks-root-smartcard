@@ -286,22 +286,15 @@ SMARTCARD_EXPECT="1"
 CARD_FOUND=false
 if [ "$SMARTCARD_EXPECT" = "1" ]; then
   dbg "smartcard expectation enabled (interactive mode)"
-  for _try in 1 2 3; do
-    dbg "card detection attempt $_try/3"
-    if check_smartcard; then
-      CARD_FOUND=true
-      dbg "pkcs11-tool detected a token-present slot"
-      break
-    fi
-    msg "smartcard not detected (attempt $_try/3), waiting for hardware..."
-	    sleep 5
-  done
-
-  if [ "$CARD_FOUND" = false ]; then
+  if check_smartcard; then
+    CARD_FOUND=true
+    dbg "pkcs11-tool detected a token-present slot"
+  else
     if prompt_skip_or_wait; then
       msg "skipping PKCS#11 smartcard flow; continuing to standard cryptroot fallback"
       exit 0
     fi
+    CARD_FOUND=true
   fi
 else
   dbg "smartcard expectation disabled (non-interactive mode)"

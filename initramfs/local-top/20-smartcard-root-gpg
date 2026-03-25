@@ -301,29 +301,23 @@ start_pcscd() {
 CARD_FOUND=false
 if [ "$SMARTCARD_EXPECT" = "1" ]; then
   dbg "smartcard expectation enabled (interactive mode)"
-  for _try in 1 2 3; do
-    dbg "card detection attempt $_try/3"
-    if check_smartcard; then
-      CARD_FOUND=true
-      break
-    fi
-    # After first failure try pcscd before sleeping.
-    if [ "$_try" = "1" ] && ! pidof pcscd >/dev/null 2>&1; then
+  if check_smartcard; then
+    CARD_FOUND=true
+  else
+    if ! pidof pcscd >/dev/null 2>&1; then
       msg "smartcard not detected via internal CCID; starting pcscd and retrying..."
       start_pcscd || true
       gpgconf --kill scdaemon 2>/dev/null || true
-      continue
+      if check_smartcard; then
+        CARD_FOUND=true
+      fi
     fi
-    msg "smartcard not detected (attempt $_try/3), waiting for hardware..."
-    # Kill scdaemon between retries so it re-probes USB on next card-status
-    gpgconf --kill scdaemon 2>/dev/null || true
-    sleep 5
-  done
-
-  if [ "$CARD_FOUND" = false ]; then
-    if prompt_skip_or_wait; then
-      msg "skipping GPG smartcard flow; continuing to standard cryptroot fallback"
-      exit 0
+    if [ "$CARD_FOUND" = false ]; then
+      if prompt_skip_or_wait; then
+        msg "skipping GPG smartcard flow; continuing to standard cryptroot fallback"
+        exit 0
+      fi
+      CARD_FOUND=true
     fi
   fi
 else
