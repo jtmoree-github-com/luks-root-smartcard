@@ -149,6 +149,11 @@ decrypt_gpg() {
 }
 
 check_smartcard() {
+  if command -v gpgconf >/dev/null 2>&1; then
+    gpgconf --kill scdaemon 2>/dev/null || true
+    gpgconf --kill gpg-agent 2>/dev/null || true
+  fi
+
   if command -v gpg >/dev/null 2>&1; then
     _card_status_log="$(mktemp /run/gpg-card-status.XXXXXX)"
     if gpg --no-options --trust-model=always --batch --no-tty --card-status >"$_card_status_log" 2>&1; then
@@ -184,7 +189,22 @@ prompt_skip_or_wait() {
       ;;
     *)
       msg "Please insert SmartCard..."
-	      until check_smartcard; do sleep 5; done
+      _wait_try=0
+      while true; do
+        _wait_try=$(( _wait_try + 1 ))
+        dbg "wait loop attempt ${_wait_try}: probing for SmartCard (scdaemon built-in CCID)"
+        # Stop pcscd so scdaemon uses its built-in CCID driver directly.
+        # This is the same path as the initial detection attempt 1, which
+        # succeeds when the card is present. pcscd in initramfs cannot detect
+        # hot-plugged cards reliably; scdaemon's CCID driver can.
+        { kill "$(cat /run/pcscd.pid 2>/dev/null)" 2>/dev/null \
+            || pkill -x pcscd 2>/dev/null; } || true
+        rm -f /run/pcscd/pcscd.comm
+        if check_smartcard; then
+          break
+        fi
+        sleep 5
+      done
       return 1
       ;;
   esac
@@ -325,39 +345,45 @@ fi
 
 TMP_KEY="$(mktemp /run/smartcard-key.XXXXXX)"
 chmod 600 "$TMP_KEY"
-unlock_ok=false
+while true; do
+  unlock_ok=false
 
-BLOB="$(extract_token_blob "$DEV" "$KEY_SPEC" || true)"
-if [ -z "$BLOB" ]; then
-  dbg "failed to extract gpg-key blob from token selector $KEY_SPEC"
-elif decrypt_gpg "$BLOB" "$TMP_KEY"; then
-  dbg "gpg token decrypt succeeded"
-  if cryptsetup luksOpen "$DEV" "$CRYPTROOT_NAME" --key-file "$TMP_KEY"; then
-    unlock_ok=true
-    dbg "cryptsetup luksOpen succeeded via GPG token"
+  BLOB="$(extract_token_blob "$DEV" "$KEY_SPEC" || true)"
+  if [ -z "$BLOB" ]; then
+    dbg "failed to extract gpg-key blob from token selector $KEY_SPEC"
+  elif decrypt_gpg "$BLOB" "$TMP_KEY"; then
+    dbg "gpg token decrypt succeeded"
+    if cryptsetup luksOpen "$DEV" "$CRYPTROOT_NAME" --key-file "$TMP_KEY"; then
+      unlock_ok=true
+      dbg "cryptsetup luksOpen succeeded via GPG token"
+    else
+      dbg "cryptsetup luksOpen failed after successful GPG token decrypt"
+    fi
   else
-    dbg "cryptsetup luksOpen failed after successful GPG token decrypt"
+    dbg "gpg token decrypt failed for selector $KEY_SPEC"
   fi
-else
-  dbg "gpg token decrypt failed for selector $KEY_SPEC"
-fi
-rm -f "${BLOB:-}"
+  rm -f "${BLOB:-}"
 
-rm -f "$TMP_KEY"
-
-if [ "$unlock_ok" = true ]; then
-  exit 0
-fi
-
-msg "GPG decrypt failed"
-if [ "$SMARTCARD_EXPECT" = "1" ]; then
-  if prompt_skip_or_wait; then
-    msg "bypassing GPG smartcard; continuing to standard cryptroot fallback"
+  if [ "$unlock_ok" = true ]; then
+    rm -f "$TMP_KEY"
     exit 0
   fi
-  # user chose to retry — loop not implemented, fall through
-  msg "GPG flow did not unlock root; continuing to standard cryptroot fallback"
+
+  msg "GPG decrypt failed"
+  if [ "$SMARTCARD_EXPECT" = "1" ]; then
+    if prompt_skip_or_wait; then
+      rm -f "$TMP_KEY"
+      msg "bypassing GPG smartcard; continuing to standard cryptroot fallback"
+      exit 0
+    fi
+    msg "smartcard detected; retrying GPG unlock"
+    if command -v gpgconf >/dev/null 2>&1; then
+      gpgconf --kill scdaemon 2>/dev/null || true
+    fi
+    continue
+  fi
+
+  rm -f "$TMP_KEY"
+  msg "GPG flow failed in non-interactive mode; continuing to standard cryptroot fallback"
   exit 0
-fi
-msg "GPG flow failed in non-interactive mode; continuing to standard cryptroot fallback"
-exit 0
+done

@@ -176,6 +176,7 @@ check_smartcard() {
   # Kill it so OpenSC can talk to the card.
   if command -v gpgconf >/dev/null 2>&1; then
     gpgconf --kill scdaemon 2>/dev/null || true
+    gpgconf --kill gpg-agent 2>/dev/null || true
   fi
   # --list-token-slots only lists slots with a token (card) actually present.
   # It exits non-zero and produces no output when no card is inserted.
@@ -201,7 +202,25 @@ prompt_skip_or_wait() {
       ;;
     *)
       msg "Please insert SmartCard..."
-	      until check_smartcard; do sleep 5; done
+      _wait_try=0
+      while true; do
+        _wait_try=$(( _wait_try + 1 ))
+        dbg "wait loop attempt ${_wait_try}: cycling pcscd and probing for SmartCard"
+        # pcscd in initramfs does not receive udev hotplug events for cards
+        # inserted after it starts. Restart it every iteration so it
+        # re-enumerates USB readers before pkcs11-tool talks to it.
+        if command -v pcscd >/dev/null 2>&1; then
+          { kill "$(cat /run/pcscd.pid 2>/dev/null)" 2>/dev/null \
+              || pkill -x pcscd 2>/dev/null; } || true
+          rm -f /run/pcscd/pcscd.comm
+          sleep 1
+          start_pcscd || true
+        fi
+        if check_smartcard; then
+          break
+        fi
+        sleep 5
+      done
       return 1
       ;;
   esac
@@ -286,44 +305,48 @@ fi
 
 TMP_KEY="$(mktemp /run/smartcard-key.XXXXXX)"
 chmod 600 "$TMP_KEY"
-unlock_ok=false
+while true; do
+  unlock_ok=false
 
-BLOB="$(extract_token_blob "$DEV" "$KEY_SPEC" || true)"
-if [ -z "$BLOB" ]; then
-  dbg "failed to extract pkcs11-key blob from token selector $KEY_SPEC"
-elif decrypt_pkcs11 "$BLOB" "$TMP_KEY"; then
-  dbg "pkcs11-tool decrypt succeeded; converting plaintext to base64 for luksOpen"
-  TMP_B64="$(mktemp /run/smartcard-b64key.XXXXXX)"
-  chmod 600 "$TMP_B64"
-  base64 -w0 < "$TMP_KEY" > "$TMP_B64"
-  rm -f "$TMP_KEY"
-  TMP_KEY="$TMP_B64"
+  BLOB="$(extract_token_blob "$DEV" "$KEY_SPEC" || true)"
+  if [ -z "$BLOB" ]; then
+    dbg "failed to extract pkcs11-key blob from token selector $KEY_SPEC"
+  elif decrypt_pkcs11 "$BLOB" "$TMP_KEY"; then
+    dbg "pkcs11-tool decrypt succeeded; converting plaintext to base64 for luksOpen"
+    TMP_B64="$(mktemp /run/smartcard-b64key.XXXXXX)"
+    chmod 600 "$TMP_B64"
+    base64 -w0 < "$TMP_KEY" > "$TMP_B64"
 
-  if cryptsetup luksOpen "$DEV" "$CRYPTROOT_NAME" --key-file "$TMP_KEY"; then
-    unlock_ok=true
-    dbg "cryptsetup luksOpen succeeded via PKCS#11"
+    if cryptsetup luksOpen "$DEV" "$CRYPTROOT_NAME" --key-file "$TMP_B64"; then
+      unlock_ok=true
+      dbg "cryptsetup luksOpen succeeded via PKCS#11"
+    else
+      dbg "cryptsetup luksOpen failed after successful PKCS#11 decrypt"
+    fi
+    rm -f "$TMP_B64"
   else
-    dbg "cryptsetup luksOpen failed after successful PKCS#11 decrypt"
+    dbg "pkcs11-tool decrypt failed for selector $KEY_SPEC"
   fi
-else
-  dbg "pkcs11-tool decrypt failed for selector $KEY_SPEC"
-fi
 
-rm -f "$TMP_KEY" "${BLOB:-}"
+  rm -f "${BLOB:-}"
 
-if [ "$unlock_ok" = true ]; then
-  exit 0
-fi
-
-msg "PKCS#11 decrypt failed"
-if [ "$SMARTCARD_EXPECT" = "1" ]; then
-  if prompt_skip_or_wait; then
-    msg "bypassing PKCS#11 smartcard; continuing to standard cryptroot fallback"
+  if [ "$unlock_ok" = true ]; then
+    rm -f "$TMP_KEY"
     exit 0
   fi
-  # user chose to retry — loop not implemented, fall through
-  msg "PKCS#11 flow did not unlock root; continuing to standard cryptroot fallback"
+
+  msg "PKCS#11 decrypt failed"
+  if [ "$SMARTCARD_EXPECT" = "1" ]; then
+    if prompt_skip_or_wait; then
+      rm -f "$TMP_KEY"
+      msg "bypassing PKCS#11 smartcard; continuing to standard cryptroot fallback"
+      exit 0
+    fi
+    msg "smartcard detected; retrying PKCS#11 unlock"
+    continue
+  fi
+
+  rm -f "$TMP_KEY"
+  msg "PKCS#11 flow failed in non-interactive mode; continuing to standard cryptroot fallback"
   exit 0
-fi
-msg "PKCS#11 flow failed in non-interactive mode; continuing to standard cryptroot fallback"
-exit 0
+done
