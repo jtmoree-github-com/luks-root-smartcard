@@ -1,0 +1,115 @@
+#!/bin/sh
+
+# TPM2 workflow hook for luks-root-smartcard.
+# Copies assets needed by the systemd-tpm2 decrypt path only.
+
+set -e
+
+PREREQ="cryptroot"
+
+prereqs()
+{
+    echo "$PREREQ"
+}
+
+case "$1" in
+    prereqs)
+        prereqs
+        exit 0
+        ;;
+esac
+
+. /usr/share/initramfs-tools/hook-functions
+
+_resolve_dev_hook() {
+    case "$1" in
+        UUID=*)      blkid -U "${1#UUID=}" 2>/dev/null ;;
+        LABEL=*)     blkid -L "${1#LABEL=}" 2>/dev/null ;;
+        PARTUUID=*)  echo "/dev/disk/by-partuuid/${1#PARTUUID=}" ;;
+        PARTLABEL=*) echo "/dev/disk/by-partlabel/${1#PARTLABEL=}" ;;
+        *)           echo "$1" ;;
+    esac
+}
+
+_has_systemd_tpm2_token() {
+    _hdev="$1"
+    _hi=0
+    while [ "$_hi" -lt 32 ]; do
+        _hjson="$(cryptsetup token export --token-id "$_hi" "$_hdev" 2>/dev/null || true)"
+        if [ -n "$_hjson" ] && printf '%s' "$_hjson" | grep -q '"type":"systemd-tpm2"'; then
+            return 0
+        fi
+        _hi=$(( _hi + 1 ))
+    done
+    return 1
+}
+
+_using_tpm2_token=false
+_crypttab="${TABFILE:-/etc/crypttab}"
+if [ -f "$_crypttab" ]; then
+    while IFS= read -r _ctline; do
+        case "$_ctline" in ''|'#'*) continue ;; esac
+        set -- $_ctline
+        [ "$#" -ge 2 ] || continue
+        _hdev="$(_resolve_dev_hook "$2" 2>/dev/null || true)"
+        if [ -b "$_hdev" ]; then
+            if _has_systemd_tpm2_token "$_hdev"; then
+                _using_tpm2_token=true
+                break
+            fi
+        else
+            _using_tpm2_token=true
+            break
+        fi
+    done < "$_crypttab"
+fi
+if [ "$_using_tpm2_token" = false ]; then
+    exit 0
+fi
+
+RV=0
+
+_plugin_copied=false
+for plugin in \
+    /usr/lib/*/cryptsetup/libcryptsetup-token-systemd-tpm2.so \
+    /usr/lib64/cryptsetup/libcryptsetup-token-systemd-tpm2.so; do
+    [ -f "$plugin" ] || continue
+    copy_exec "$plugin"
+    _plugin_copied=true
+
+    ldd "$plugin" 2>/dev/null \
+        | awk '/=> \/|^\// {print $(NF-1)}' \
+        | while IFS= read -r so; do
+            [ -f "$so" ] && copy_exec "$so"
+        done
+    break
+done
+
+if [ "$_plugin_copied" = false ]; then
+    echo "WARNING: systemd TPM2 cryptsetup token plugin not found, TPM2 token unlock will not work" >&2
+    RV=1
+fi
+
+# Copy TSS2 libraries — libsystemd-shared dlopen's these at runtime so they
+# do not appear in ldd output and must be copied explicitly.
+for _tss2lib in \
+    libtss2-esys.so.0 \
+    libtss2-mu.so.0 \
+    libtss2-rc.so.0 \
+    libtss2-sys.so.1 \
+    libtss2-tctildr.so.0 \
+    libtss2-tcti-device.so.0; do
+    for _libdir in /usr/lib/x86_64-linux-gnu /usr/lib/aarch64-linux-gnu /usr/lib64 /usr/lib; do
+        _tss2path="$_libdir/$_tss2lib"
+        if [ -f "$_tss2path" ]; then
+            copy_exec "$_tss2path"
+            break
+        fi
+    done
+done
+
+for mod in tpm tpm_tis tpm_tis_core tpm_crb; do
+    manual_add_modules "$mod" 2>/dev/null || true
+done
+
+exit $RV

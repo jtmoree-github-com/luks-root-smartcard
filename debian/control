@@ -9,8 +9,8 @@ Homepage: https://github.com/jtmoree-github-com/luks-root-smartcard
 
 Package: luks-root-smartcard-tools
 Architecture: all
-Depends: ${misc:Depends}, cryptsetup-initramfs, initramfs-tools, gnupg, opensc, pcscd
-Description: Smartcard-based LUKS root unlock for Debian/Ubuntu
- Provides an initramfs hook and boot script that decrypt the root volume
- key on a smartcard (pkcs11-tool or GPG/scdaemon) without requiring
- systemd libraries in the initrd.
+Depends: ${misc:Depends}, cryptsetup-initramfs, initramfs-tools, gnupg, opensc, pcscd, systemd-cryptsetup
+Description: Smartcard and TPM2-based LUKS root unlock for Debian/Ubuntu
+ Provides initramfs hooks and boot scripts that unlock the root volume
+ using a smartcard (pkcs11-tool or GPG/scdaemon) or a TPM2 token
+ enrolled with systemd-cryptenroll.

@@ -2,23 +2,27 @@
 
 **Smartcard-based LUKS root unlock for Debian/Ubuntu initramfs**
 
-Smartcard integration with root LUKS drives can be complex.  This script assists setup with initramfs and LUKS using either systemd implementation of luks2 smartcard or gpg based workflows.  The gpg workflow supports the traditional encrypted key file on disk from stock debian/ubuntu and storing the encrypted key in a luks2 header token.
+Smartcard integration with root LUKS drives can be complex.  This script assists setup with initramfs and LUKS.  Multiple workflows are supported.
 
+- TPM2 workflow (`systemd-tpm2`)
 - PKCS#11 workflow (`systemd-pkcs11`)
 - GPG workflow (`root-gpg` token or GPG key file)
 
-*Note that debian/ubuntu do not ship systemd in the boot process.  I have implemented support for systemd-pkcs11 without using systemd to allow booting root volumes encrypted with systemd-cryptenroll using initramfs-tools.*
+Since systemd is not available during boot on many systems we implement a boot process that supports systemd based luks2 smartcard integration without systemd.  This may use a TPM or other types of tokens created by systemd-cryptenroll.  
+
+The gpg workflow supports the traditional encrypted key file on disk from stock debian/ubuntu and storing the encrypted key in a luks2 header token.
 
 ## How it works
 
 At boot, separate `local-top` scripts handle each workflow:
 
 1. Reads `/etc/crypttab` to find the root mapping/device.
-2. `00-smartcard-root-pkcs11` handles PKCS#11 tokens found in the LUKS2 header.
-3. `00-smartcard-root-gpg` handles `root-gpg` tokens found in the LUKS2 header.
-4. Both scripts run at boot; each script attempts only its own workflow.
-5. The selected script detects card/token, decrypts key material, and opens root.
-6. Falls back to passphrase prompt if card decrypt fails.
+1. `00-smartcard-root-tpm2` handles `systemd-tpm2` tokens found in the LUKS2 header.
+1. `00-smartcard-root-pkcs11` handles PKCS#11 tokens found in the LUKS2 header.
+1. `00-smartcard-root-gpg` handles `root-gpg` tokens found in the LUKS2 header.
+1. All scripts run at boot; each script attempts only its own workflow.
+1. The selected script detects card/token, decrypts key material, and opens root.
+1. Falls back to passphrase prompt if token decrypt fails.
 
 ## What the package installs
 
@@ -26,8 +30,10 @@ At boot, separate `local-top` scripts handle each workflow:
 |------|---------|
 | `/usr/share/initramfs-tools/hooks/smartcard-root-pkcs11` | Initramfs hook for PKCS#11 workflow (`pkcs11-tool`, `pcscd`, CCID stack, base64 helpers) |
 | `/usr/share/initramfs-tools/hooks/smartcard-root-gpg` | Initramfs hook for GPG workflow (`gpg`, `scdaemon` — no pcscd; scdaemon uses its built-in CCID driver) |
+| `/usr/share/initramfs-tools/hooks/smartcard-root-tpm2` | Initramfs hook for TPM2 workflow (`systemd-tpm2` cryptsetup token plugin and TPM drivers) |
 | `/usr/share/initramfs-tools/scripts/local-top/00-smartcard-root-pkcs11` | Boot script for PKCS#11 token decrypt + base64 transform |
 | `/usr/share/initramfs-tools/scripts/local-top/00-smartcard-root-gpg` | Boot script for `root-gpg` token decrypt or GPG keyfile decrypt |
+| `/usr/share/initramfs-tools/scripts/local-top/00-smartcard-root-tpm2` | Boot script for `systemd-tpm2` token unlock via `cryptsetup` token plugin |
 | `/usr/share/initramfs-tools/scripts/local-bottom/smartcard-root` | Teardown — kills `pcscd` and cleans up sensitive files |
 | `/usr/sbin/gpg-cryptenroll` | Helper to generate and store GPG-encrypted key material |
 
@@ -37,14 +43,17 @@ At boot, separate `local-top` scripts handle each workflow:
 |------|---------|----------------|
 | `systemd-pkcs11` | LUKS2 token (enrolled via `systemd-cryptenroll`) | `pkcs11-tool --decrypt --mechanism RSA-PKCS` + base64 |
 | `root-gpg` | LUKS2 token (enrolled via `gpg-cryptenroll`) | `gpg --decrypt` via scdaemon |
+| `systemd-tpm2` | LUKS2 token (enrolled via `systemd-cryptenroll`) | `cryptsetup luksOpen --token-type systemd-tpm2` |
 | GPG key file | File path in crypttab field 3 | `gpg --decrypt` via scdaemon |
 
 ## Prerequisites
 
-- A smartcard with an RSA or OpenPGP key (tested with Purism Librem Key)
+- A smartcard with an RSA or OpenPGP key (tested with Purism Librem Key), or a TPM2 device
 - `pcscd`, `opensc-pkcs11`, `libccid` (for PKCS#11 path)
 - `gnupg`, `scdaemon` (for GPG path)
+- `systemd-cryptsetup` with the `systemd-tpm2` token plugin (for TPM2 path)
 - For `systemd-pkcs11` tokens: enroll with `systemd-cryptenroll --pkcs11-token-uri=...`
+- For `systemd-tpm2` tokens: enroll with `systemd-cryptenroll --tpm2-device=auto ...`
 
 ## crypttab setup
 
@@ -70,18 +79,34 @@ Interactive smartcard expectation is controlled by token presence on the root LU
 
 - If a `root-gpg` token exists, GPG smartcard handling runs.
 - If a `systemd-pkcs11` token exists, PKCS#11 smartcard handling runs.
-- If no matching token exists for a workflow, that workflow exits quietly (no smartcard prompt).
+- If a `systemd-tpm2` token exists, TPM2 handling runs.
+- If no matching token exists for a workflow, that workflow exits quietly (no prompt).
 
-When a matching token exists but no smartcard is detected, the user is prompted to either:
+When a matching smartcard token exists but no smartcard is detected, the user is prompted to either:
 
 - insert the smartcard and continue token unlock, or
 - bypass smartcard and fall back to passphrase unlock.
+
+When a matching TPM2 token exists, the TPM2 workflow attempts unlock automatically and falls back to passphrase if the TPM is unavailable or policy verification fails.
 
 ## Quick start (systemd-pkcs11)
 
 ```bash
 # Enroll the smartcard (prompts for LUKS passphrase and card PIN)
 sudo systemd-cryptenroll --pkcs11-token-uri="auto" /dev/<luks-device>
+
+# Recommended: set crypttab field 3 to none for token mode
+# (edit /etc/crypttab so the line reads: <name> UUID=<uuid> none luks)
+
+# Rebuild initramfs
+sudo update-initramfs -u -k "$(uname -r)"
+```
+
+## Quick start (TPM2)
+
+```bash
+# Enroll TPM2-based unlock against PCR 7
+sudo systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs=7 /dev/<luks-device>
 
 # Recommended: set crypttab field 3 to none for token mode
 # (edit /etc/crypttab so the line reads: <name> UUID=<uuid> none luks)
