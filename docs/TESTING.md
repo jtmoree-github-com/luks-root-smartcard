@@ -6,7 +6,20 @@ Automated test scripts:
 
 - `scripts/test-gpg-file-chain.sh`
 - `scripts/test-gpg-token-chain.sh`
+- `scripts/test-fido2-chain.sh`
 - `scripts/test-pkcs11-chain.sh`
+
+## FIDO2 chain test
+
+`scripts/test-fido2-chain.sh` runs the full FIDO2 chain end-to-end
+using a loopback LUKS2 device and a real FIDO2 authenticator:
+
+```bash
+sudo ./scripts/test-fido2-chain.sh
+```
+
+Creates a temporary LUKS volume, enrolls FIDO2 via `systemd-cryptenroll`,
+then validates `cryptsetup luksOpen --token-only --token-type systemd-fido2`.
 
 ## PKCS#11 chain test
 

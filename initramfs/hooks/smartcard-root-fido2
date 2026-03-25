@@ -1,0 +1,117 @@
+#!/bin/sh
+
+# FIDO2 workflow hook for luks-root-smartcard.
+# Copies assets needed by the systemd-fido2 decrypt path only.
+
+set -e
+
+PREREQ="cryptroot"
+
+prereqs()
+{
+    echo "$PREREQ"
+}
+
+case "$1" in
+    prereqs)
+        prereqs
+        exit 0
+        ;;
+esac
+
+. /usr/share/initramfs-tools/hook-functions
+
+_resolve_dev_hook() {
+    case "$1" in
+        UUID=*)      blkid -U "${1#UUID=}" 2>/dev/null ;;
+        LABEL=*)     blkid -L "${1#LABEL=}" 2>/dev/null ;;
+        PARTUUID=*)  echo "/dev/disk/by-partuuid/${1#PARTUUID=}" ;;
+        PARTLABEL=*) echo "/dev/disk/by-partlabel/${1#PARTLABEL=}" ;;
+        *)           echo "$1" ;;
+    esac
+}
+
+_has_systemd_fido2_token() {
+    _hdev="$1"
+    _hi=0
+    while [ "$_hi" -lt 32 ]; do
+        _hjson="$(cryptsetup token export --token-id "$_hi" "$_hdev" 2>/dev/null || true)"
+        if [ -n "$_hjson" ] && printf '%s' "$_hjson" | grep -q '"type":"systemd-fido2"'; then
+            return 0
+        fi
+        _hi=$(( _hi + 1 ))
+    done
+    return 1
+}
+
+_using_fido2_token=false
+_crypttab="${TABFILE:-/etc/crypttab}"
+if [ -f "$_crypttab" ]; then
+    while IFS= read -r _ctline; do
+        case "$_ctline" in ''|'#'*) continue ;; esac
+        set -- $_ctline
+        [ "$#" -ge 2 ] || continue
+        _hdev="$( _resolve_dev_hook "$2" 2>/dev/null || true )"
+        if [ -b "$_hdev" ]; then
+            if _has_systemd_fido2_token "$_hdev"; then
+                _using_fido2_token=true
+                break
+            fi
+        else
+            _using_fido2_token=true
+            break
+        fi
+    done < "$_crypttab"
+fi
+if [ "$_using_fido2_token" = false ]; then
+    exit 0
+fi
+
+RV=0
+
+_plugin_copied=false
+for plugin in \
+    /usr/lib/*/cryptsetup/libcryptsetup-token-systemd-fido2.so \
+    /usr/lib64/cryptsetup/libcryptsetup-token-systemd-fido2.so; do
+    [ -f "$plugin" ] || continue
+    copy_exec "$plugin"
+    _plugin_copied=true
+
+    ldd "$plugin" 2>/dev/null \
+        | awk '/=> \/|^\// {print $(NF-1)}' \
+        | while IFS= read -r so; do
+            [ -f "$so" ] && copy_exec "$so"
+        done
+    break
+done
+
+if [ "$_plugin_copied" = false ]; then
+    echo "WARNING: systemd FIDO2 cryptsetup token plugin not found, FIDO2 token unlock will not work" >&2
+    RV=1
+fi
+
+# Copy libfido2 explicitly — systemd loads this via dlopen at runtime.
+_fido2_copied=false
+for _fido2 in /usr/lib/*/libfido2.so.* /lib/*/libfido2.so.* /usr/lib64/libfido2.so.* /lib64/libfido2.so.*; do
+    [ -f "$_fido2" ] || continue
+    copy_exec "$_fido2"
+    _fido2_copied=true
+
+    ldd "$_fido2" 2>/dev/null \
+        | awk '/=> \/|^\// {print $(NF-1)}' \
+        | while IFS= read -r so; do
+            [ -f "$so" ] && copy_exec "$so"
+        done
+    break
+done
+
+if [ "$_fido2_copied" = false ]; then
+    echo "WARNING: libfido2 not found, FIDO2 token unlock will not work" >&2
+    RV=1
+fi
+
+for mod in hid hid_generic usbhid hidraw; do
+    manual_add_modules "$mod" 2>/dev/null || true
+done
+
+exit $RV

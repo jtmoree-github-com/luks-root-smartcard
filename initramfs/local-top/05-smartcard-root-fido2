@@ -1,0 +1,209 @@
+#!/bin/sh
+set -eu
+
+PREREQ=""
+
+prereqs() {
+  echo "$PREREQ"
+}
+
+case "${1:-}" in
+  prereqs)
+    prereqs
+    exit 0
+    ;;
+esac
+
+. /scripts/functions
+
+DEBUG_ENABLED=0
+for _dbg_tok in $(cat /proc/cmdline 2>/dev/null); do
+  case "$_dbg_tok" in
+    rd.debug*) DEBUG_ENABLED=1; break ;;
+  esac
+done
+
+msg() { echo "smartcard-root-fido2: $*" >&2; }
+dbg() {
+  [ "$DEBUG_ENABLED" = "1" ] || return 0
+  echo "smartcard-root-fido2: DEBUG: $*" >&2
+}
+
+get_root_mapper_name() {
+  for tok in $(cat /proc/cmdline); do
+    case "$tok" in root=/dev/mapper/*) echo "${tok#root=/dev/mapper/}"; return 0 ;; esac
+  done
+  echo ""
+}
+
+resolve_mapping() {
+  preferred_target="$1"
+  found_target=""
+  found_source=""
+  found_key=""
+
+  [ -r /cryptroot/crypttab ] || panic "smartcard-root-fido2: /cryptroot/crypttab missing"
+
+  while IFS= read -r line; do
+    case "$line" in ''|'#'*) continue ;; esac
+    set -- $line
+    [ "$#" -ge 3 ] || continue
+    if [ -n "$preferred_target" ]; then
+      [ "$1" = "$preferred_target" ] || continue
+    fi
+    if [ -z "$found_target" ]; then
+      found_target="$1"; found_source="$2"; found_key="$3"
+      [ -n "$preferred_target" ] && break
+    fi
+  done </cryptroot/crypttab
+
+  [ -n "$found_target" ] || panic "smartcard-root-fido2: no usable mapping found in /cryptroot/crypttab"
+  printf '%s|%s|%s\n' "$found_target" "$found_source" "$found_key"
+}
+
+resolve_device() {
+  case "$1" in
+    UUID=*)     blkid -U "${1#UUID=}" 2>/dev/null ;;
+    LABEL=*)    blkid -L "${1#LABEL=}" 2>/dev/null ;;
+    PARTUUID=*) echo "/dev/disk/by-partuuid/${1#PARTUUID=}" ;;
+    PARTLABEL=*) echo "/dev/disk/by-partlabel/${1#PARTLABEL=}" ;;
+    *)          echo "$1" ;;
+  esac
+}
+
+auto_detect_fido2_token() {
+  _dev="$1"
+  _i=0
+  while [ "$_i" -lt 32 ]; do
+    _json="$(cryptsetup token export --token-id "$_i" "$_dev" 2>/dev/null || true)"
+    if [ -n "$_json" ]; then
+      _type="$(printf '%s' "$_json" | tr -d '\n' | sed -n 's/.*"type":"\([^"]*\)".*/\1/p')"
+      dbg "token $_i type=${_type:-unknown}"
+      if [ "$_type" = "systemd-fido2" ]; then
+        echo "$_i"
+        return 0
+      fi
+    fi
+    _i=$(( _i + 1 ))
+  done
+  return 1
+}
+
+find_fido2_plugin_dir() {
+  for _dir in /usr/lib/*/cryptsetup /usr/lib64/cryptsetup; do
+    [ -f "$_dir/libcryptsetup-token-systemd-fido2.so" ] || continue
+    echo "$_dir"
+    return 0
+  done
+  return 1
+}
+
+wait_for_fido2_device() {
+  _try=0
+  while [ "$_try" -lt 10 ]; do
+    for _node in /dev/hidraw*; do
+      [ -c "$_node" ] || continue
+      dbg "found HID device: $_node"
+      return 0
+    done
+    _try=$(( _try + 1 ))
+    dbg "waiting for HID device ($_try/10)"
+    sleep 1
+  done
+  return 1
+}
+
+prompt_skip_or_wait_fido2() {
+  if [ -f /run/smartcard-skip-requested ]; then
+    return 0
+  fi
+
+  echo "No FIDO2 authenticator detected for systemd-fido2 flow. Skip FIDO2 and continue with fallback workflows? [Y/n]" >&2
+  read ANSWER
+  case "${ANSWER:-Y}" in
+    y|Y|"")
+      : >/run/smartcard-skip-requested
+      return 0
+      ;;
+    *)
+      msg "Waiting for FIDO2 authenticator..."
+      while true; do
+        if wait_for_fido2_device; then
+          break
+        fi
+        sleep 1
+      done
+      return 1
+      ;;
+  esac
+}
+
+prompt_retry_fido2_unlock() {
+  echo "Retry FIDO2 token unlock now? [y/N]" >&2
+  read ANSWER
+  case "${ANSWER:-N}" in
+    y|Y) return 0 ;;
+    *)   return 1 ;;
+  esac
+}
+
+mapping="$(resolve_mapping "$(get_root_mapper_name)")"
+CRYPTROOT_NAME="${mapping%%|*}"
+rest="${mapping#*|}"
+CRYPTROOT_SOURCE="${rest%%|*}"
+KEY_SPEC="${rest#*|}"
+
+dbg "mapping name=$CRYPTROOT_NAME source=$CRYPTROOT_SOURCE key-spec=${KEY_SPEC:-<empty>}"
+
+if cryptsetup status "$CRYPTROOT_NAME" >/dev/null 2>&1; then
+  dbg "mapping $CRYPTROOT_NAME already active"
+  exit 0
+fi
+
+DEV="$(resolve_device "$CRYPTROOT_SOURCE")" || panic "smartcard-root-fido2: cannot resolve device $CRYPTROOT_SOURCE"
+[ -b "$DEV" ] || panic "smartcard-root-fido2: $DEV is not a block device"
+dbg "resolved backing device: $DEV"
+
+TOKEN_ID="$(auto_detect_fido2_token "$DEV" || true)"
+if [ -z "$TOKEN_ID" ]; then
+  dbg "no systemd-fido2 token found on root device; exiting FIDO2 path"
+  exit 0
+fi
+msg "auto-detected token selector: systemd-fido2:$TOKEN_ID"
+
+PLUGIN_DIR="$(find_fido2_plugin_dir || true)"
+if [ -z "$PLUGIN_DIR" ]; then
+  msg "FIDO2 token plugin not present in initramfs; continuing to next workflow"
+  exit 0
+fi
+
+if ! wait_for_fido2_device; then
+  if prompt_skip_or_wait_fido2; then
+    msg "skipping FIDO2 workflow; continuing to next workflow"
+    exit 0
+  fi
+fi
+
+while true; do
+  if cryptsetup luksOpen \
+      --token-only \
+      --token-type systemd-fido2 \
+      --token-id "$TOKEN_ID" \
+      --external-tokens-path "$PLUGIN_DIR" \
+      "$DEV" "$CRYPTROOT_NAME"; then
+    dbg "cryptsetup luksOpen succeeded via FIDO2 token"
+    exit 0
+  fi
+
+  msg "FIDO2 unlock failed"
+  if prompt_skip_or_wait_fido2; then
+    msg "bypassing FIDO2 workflow; continuing to next workflow"
+    exit 0
+  fi
+  if prompt_retry_fido2_unlock; then
+    msg "user requested retry of FIDO2 unlock"
+    continue
+  fi
+  msg "not retrying FIDO2 unlock; continuing to next workflow"
+  exit 0
+done
