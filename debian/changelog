@@ -1,4 +1,11 @@
-luks-root-smartcard-tools (1.0.27) unstable; urgency=medium
+luks-root-smartcard-tools (1.0.28) unstable; urgency=medium
+
+  * change gpg-root to gpg-token
+  * add mkuki.sh
+
+ -- JT <jtmoree@users.noreply.github.com>  Sat, 14 Mar 2026 00:00:00 +0000
+
+luks-root-smartcard-tools (1.0.26) unstable; urgency=medium
 
   * support systemd-tpm2, systemd-fido2
   * remove wait loops before prompts

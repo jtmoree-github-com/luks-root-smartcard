@@ -7,7 +7,7 @@ Smartcard integration with root LUKS drives can be complex.  This script assists
 - TPM2 workflow (systemd-tpm2)
 - FIDO2 workflow (systemd-fido2)
 - PKCS#11 workflow (systemd-pkcs11)
-- GPG workflow (root-gpg token or GPG key file)
+- GPG workflow (gpg-token token or GPG key file)
 
 Since systemd is not available during boot on many systems we implement a boot process that supports systemd based luks2 smartcard integration without systemd.  This may use a TPM or other types of tokens created by systemd-cryptenroll.  
 
@@ -21,7 +21,7 @@ At boot, separate `local-top` scripts handle each workflow:
 1. `00-smartcard-root-tpm2` handles *systemd-tpm2* tokens found in the LUKS2 header.
 1. `05-smartcard-root-fido2` handles *systemd-fido2* tokens found in the LUKS2 header.
 1. `10-smartcard-root-pkcs11` handles *systemd-pkcs11* tokens found in the LUKS2 header.
-1. `20-smartcard-root-gpg` handles *root-gpg* tokens found in the LUKS2 header.
+1. `20-smartcard-root-gpg` handles *gpg-token* tokens found in the LUKS2 header.
 1. All scripts run at boot; each script attempts only its own workflow.
 1. Each script detects card/token, decrypts key material, and opens root.
 1. Falls back to passphrase prompt if token decrypt fails.
@@ -37,7 +37,7 @@ At boot, separate `local-top` scripts handle each workflow:
 | /usr/share/initramfs-tools/scripts/local-top/05-smartcard-root-fido2 | Boot script for systemd-fido2 token unlock via cryptsetup token plugin |
 | /usr/share/initramfs-tools/scripts/local-top/10-smartcard-root-pkcs11 | Boot script for systemd-pkcs11 token decrypt + base64 transform |
 | /usr/share/initramfs-tools/scripts/local-top/10-smartcard-root-pkcs11 | Boot script for systemd-pkcs11 token decrypt + base64 transform |
-| /usr/share/initramfs-tools/scripts/local-top/20-smartcard-root-gpg | Boot script for root-gpg token decrypt or GPG keyfile decrypt |
+| /usr/share/initramfs-tools/scripts/local-top/20-smartcard-root-gpg | Boot script for gpg-token token decrypt or GPG keyfile decrypt |
 | /usr/share/initramfs-tools/scripts/local-top/00-smartcard-root-tpm2 | Boot script for systemd-tpm2 token unlock via cryptsetup token plugin |
 | /usr/share/initramfs-tools/scripts/local-bottom/smartcard-root | Teardown — kills pcscd and cleans up sensitive files |
 | /usr/sbin/gpg-cryptenroll | Helper to generate and store GPG-encrypted key material |
@@ -49,12 +49,14 @@ At boot, separate `local-top` scripts handle each workflow:
 | systemd-pkcs11 LUKS2 token | systemd-cryptenroll | `pkcs11-tool --decrypt --mechanism RSA-PKCS` + base64 |
 | systemd-fido2 LUKS2 token | systemd-cryptenroll | `cryptsetup luksOpen --token-type systemd-fido2` |
 | systemd-tpm2 LUKS2 token | systemd-cryptenroll | `cryptsetup luksOpen --token-type systemd-tpm2` |
-| root-gpg LUKS2 token | gpg-cryptenroll | `gpg --decrypt` via scdaemon |
+| gpg-token LUKS2 token | gpg-cryptenroll | `gpg --decrypt` via scdaemon |
 | GPG key file | gpg-cryptenroll | `gpg --decrypt` via scdaemon |
 
 ## Prerequisites
 
-- A smartcard with an RSA or OpenPGP key (tested with Purism Librem Key), or a TPM2 device
+### Setup
+
+- A smartcard with an RSA or OpenPGP key or a TPM2 device
 - *pcscd*, *opensc-pkcs11*, *libccid* (for PKCS#11 path)
 - *gnupg*, *scdaemon* (for GPG path)
 - *libfido2* and a FIDO2 authenticator exposed as */dev/hidraw** (for FIDO2 path)
@@ -63,6 +65,14 @@ At boot, separate `local-top` scripts handle each workflow:
 - For *systemd-pkcs11* tokens: enroll with *systemd-cryptenroll --pkcs11-token-uri=...*
 - For *systemd-fido2* tokens: enroll with *systemd-cryptenroll --fido2-device=auto ...*
 - For *systemd-tpm2* tokens: enroll with *systemd-cryptenroll --tpm2-device=auto ...*
+- For *gpg-token* tokens: enroll with *gpg-cryptenroll token:auto ...*
+
+### Boot
+
+- A smartcard with an RSA or OpenPGP key or a TPM2 device
+- *pcscd*, *opensc-pkcs11*, *libccid* (for PKCS#11 path)
+- *gnupg*, *scdaemon* (for GPG path)
+- *libfido2* and a FIDO2 authenticator exposed as */dev/hidraw** (for FIDO2 path)
 
 ## crypttab setup
 
@@ -89,7 +99,7 @@ Interactive smartcard expectation is controlled by token presence on the root LU
 - If a *systemd-tpm2* token exists, TPM2 handling runs.
 - If a *systemd-fido2* token exists, FIDO2 handling runs.
 - If a *systemd-pkcs11* token exists, PKCS#11 smartcard handling runs.
-- If a *root-gpg* token exists, GPG token smartcard handling runs.
+- If a *gpg-token* token exists, GPG token smartcard handling runs.
 - If no matching token exists for a workflow, that workflow exits quietly (no prompt).
 
 When a matching smartcard token exists but no smartcard is detected, the user is prompted to either:

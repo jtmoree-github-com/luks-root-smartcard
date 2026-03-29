@@ -3,7 +3,7 @@
 # using a virtual (loopback) LUKS2 device + the real smartcard.
 #
 # Uses gpg-cryptenroll to generate a key, enroll into a LUKS keyslot,
-# and store the encrypted blob as a LUKS2 root-gpg token.
+# and store the encrypted blob as a LUKS2 gpg-token token.
 # Then exercises the same extract→decrypt→unlock path the boot script uses.
 #
 # Run as your normal user — sudo is used internally where root is needed.
@@ -98,7 +98,7 @@ ok "gpg-cryptenroll completed"
 
 # ── Step 3: Verify token is present ─────────────────────────────────────────
 echo ""
-echo "=== Step 3: Verify LUKS2 root-gpg token ==="
+echo "=== Step 3: Verify LUKS2 gpg-token token ==="
 
 # Find the token (scan slots 0-31, same as boot script)
 TOKEN_ID=""
@@ -108,7 +108,7 @@ while [ "$_i" -lt 32 ]; do
   _json="$(sudo cryptsetup token export --token-id "$_i" "$LOOP_DEV" 2>/dev/null || true)"
   if [ -n "$_json" ]; then
     _t="$(json_value "$_json" "type" || true)"
-    if [ "$_t" = "root-gpg" ] || [ "$_t" = "luks2-gpg" ]; then
+    if [ "$_t" = "gpg-token" ]; then
       TOKEN_ID="$_i"
       TOKEN_JSON="$_json"
       break
@@ -117,14 +117,14 @@ while [ "$_i" -lt 32 ]; do
   _i=$(( _i + 1 ))
 done
 
-[ -n "$TOKEN_ID" ] || die "no root-gpg token found in LUKS2 header"
+[ -n "$TOKEN_ID" ] || die "no gpg-token token found in LUKS2 header"
 ok "found token id $TOKEN_ID"
 
 TOKEN_TYPE="$(json_value "$TOKEN_JSON" "type")"
 ok "token type: $TOKEN_TYPE"
 
 TOKEN_KEYSLOT="$(printf '%s' "$TOKEN_JSON" | tr -d '\n' | sed -n 's/.*"keyslots"[[:space:]]*:[[:space:]]*\[[[:space:]]*"\{0,1\}\([0-9][0-9]*\)"\{0,1\}[[:space:]]*\].*/\1/p')"
-[ -n "$TOKEN_KEYSLOT" ] || die "keyslots field does not include an enrolled slot in root-gpg token JSON"
+[ -n "$TOKEN_KEYSLOT" ] || die "keyslots field does not include an enrolled slot in gpg-token token JSON"
 ok "token metadata keyslots[0]: $TOKEN_KEYSLOT"
 
 echo ""

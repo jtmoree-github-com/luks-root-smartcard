@@ -7,7 +7,7 @@
 # gpg --decrypt → cryptsetup luksOpen path that the boot script uses.
 #
 # This tests the "GPG key file in crypttab field 3" workflow, as opposed to
-# the "root-gpg LUKS2 token" workflow tested by test-gpg-token-chain.sh.
+# the "gpg-token LUKS2 token" workflow tested by test-gpg-token-chain.sh.
 #
 # Run as your normal user — sudo is used internally where root is needed.
 # Usage:  ./scripts/test-gpg-file-chain.sh [--recipient <gpg-id>]

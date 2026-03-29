@@ -322,14 +322,14 @@ import_luks2_gpg_token() {
   _blob_b64="$(base64 <"$_blob_path" | tr -d '\n')"
   [ -n "$_blob_b64" ] || die "failed to encode encrypted key for token storage"
 
-  _json_tmp="$(mktemp /dev/shm/root-gpg-token.XXXXXX.json)"
+  _json_tmp="$(mktemp /dev/shm/gpg-token.XXXXXX.json)"
   chmod 600 "$_json_tmp"
   _keyslots_json="[]"
   case "$_meta_keyslot" in
     [0-9]|[1-2][0-9]|3[0-1]) _keyslots_json='["'"$_meta_keyslot"'"]' ;;
   esac
   cat >"$_json_tmp" <<EOF
-{"type":"root-gpg","keyslots":$_keyslots_json,"gpg-recipient":"$_recipient","gpg-key":"$_blob_b64"}
+{"type":"gpg-token","keyslots":$_keyslots_json,"gpg-recipient":"$_recipient","gpg-key":"$_blob_b64"}
 EOF
 
   _token_args=""
@@ -343,7 +343,7 @@ EOF
   # shellcheck disable=SC2086
   if ! cryptsetup token import $_token_args --json-file "$_json_tmp" "$_dev"; then
     rm -f "$_json_tmp"
-    die "failed to import root-gpg token"
+    die "failed to import gpg-token token"
   fi
 
   rm -f "$_json_tmp"
@@ -582,7 +582,7 @@ fi
 if [ "$TOKEN_MODE" -eq 1 ]; then
   [ -n "$ENROLLED_KEYSLOT" ] || ENROLLED_KEYSLOT="$KEYSLOT"
   import_luks2_gpg_token "$LUKS_DEVICE" "$KEYSLOT" "$TOKEN_ID" "$RECIPIENT" "$OUTPUT_PATH" "$FORCE" "$ENROLLED_KEYSLOT"
-  echo "Imported LUKS2 token type 'root-gpg' on $LUKS_DEVICE"
+  echo "Imported LUKS2 token type 'gpg-token' on $LUKS_DEVICE"
   echo "Token metadata: keyslots=[$ENROLLED_KEYSLOT] when resolvable (informational only)"
   echo "Use crypttab field 3 value: none"
   print_crypttab_guidance "none" "luks" "LUKS2 token"

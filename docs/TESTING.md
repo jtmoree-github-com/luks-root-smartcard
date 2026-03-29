@@ -43,7 +43,7 @@ sudo ./scripts/test-gpg-token-chain.sh [--recipient <gpg-id>]
 ```
 
 Uses `gpg-cryptenroll` to generate a random key, enroll it into a LUKS2 keyslot,
-and store the GPG-encrypted blob as a `root-gpg` token in the LUKS2 header.
+and store the GPG-encrypted blob as a `gpg-token` token in the LUKS2 header.
 Then exercises the same extract → `gpg --decrypt` → `cryptsetup luksOpen` path
 that the boot script uses.
 
@@ -52,7 +52,7 @@ from the smartcard.
 
 Boot-time expectation behavior for token unlock is token-driven:
 
-- `root-gpg` token present in the root LUKS2 header: GPG smartcard flow runs.
+- `gpg-token` token present in the root LUKS2 header: GPG smartcard flow runs.
 - `systemd-pkcs11` token present in the root LUKS2 header: PKCS#11 flow runs.
 - no matching token present: workflow exits quietly (no smartcard prompt).
 

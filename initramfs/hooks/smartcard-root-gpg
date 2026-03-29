@@ -22,7 +22,7 @@ esac
 . /usr/share/initramfs-tools/hook-functions
 
 # Token-driven activation: for each crypttab entry, resolve the backing device
-# and scan its LUKS2 header for a root-gpg token. If found, include assets.
+# and scan its LUKS2 header for a gpg-token token. If found, include assets.
 # If a device cannot be resolved at build time, include assets conservatively.
 
 _resolve_dev_hook() {
@@ -40,7 +40,7 @@ _has_root_gpg_token() {
     _hi=0
     while [ "$_hi" -lt 32 ]; do
         _hjson="$(cryptsetup token export --token-id "$_hi" "$_hdev" 2>/dev/null || true)"
-        if [ -n "$_hjson" ] && printf '%s' "$_hjson" | grep -q '"type":"root-gpg"'; then
+        if [ -n "$_hjson" ] && printf '%s' "$_hjson" | grep -q '"type":"gpg-token"'; then
             return 0
         fi
         _hi=$(( _hi + 1 ))

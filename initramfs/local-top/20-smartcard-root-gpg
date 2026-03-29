@@ -29,9 +29,9 @@ dbg() {
   echo "smartcard-root-gpg: DEBUG: $*" >&2
 }
 
-# This script is token-driven: it scans the root LUKS2 header for root-gpg
+# This script is token-driven: it scans the root LUKS2 header for gpg-token
 # tokens and only activates smartcard handling when such a token is present.
-# If no root-gpg token exists, it exits without prompting.
+# If no gpg-token token exists, it exits without prompting.
 
 # Set GNUPGHOME so all gpg calls (card-status, decrypt, etc.) use it.
 # gpg --card-status auto-creates secret-key stubs when a matching pubkey exists.
@@ -103,7 +103,7 @@ extract_token_blob() {
       _json="$(cryptsetup token export --token-id "$_i" "$_dev" 2>/dev/null || true)"
       if [ -n "$_json" ]; then
         _t="$(json_value "$_json" "type" || true)"
-        if [ "$_t" = "root-gpg" ]; then
+        if [ "$_t" = "gpg-token" ]; then
           _b64="$(json_value "$_json" "gpg-key" || true)"
           [ -n "$_b64" ] && break
         fi
@@ -114,7 +114,7 @@ extract_token_blob() {
     _json="$(cryptsetup token export --token-id "$_token_id" "$_dev" 2>/dev/null || true)"
     if [ -n "$_json" ]; then
       _t="$(json_value "$_json" "type" || true)"
-      if [ "$_t" = "root-gpg" ]; then
+      if [ "$_t" = "gpg-token" ]; then
         _b64="$(json_value "$_json" "gpg-key" || true)"
       fi
     fi
@@ -221,8 +221,8 @@ auto_detect_gpg_token() {
     if [ -n "$_json" ]; then
       _t="$(json_value "$_json" "type" || true)"
       dbg "token $_i type=${_t:-unknown}"
-      if [ "$_t" = "root-gpg" ]; then
-        echo "root-gpg:$_i"
+      if [ "$_t" = "gpg-token" ]; then
+        echo "gpg-token:$_i"
         return 0
       fi
     fi
@@ -249,10 +249,10 @@ DEV="$(resolve_device "$CRYPTROOT_SOURCE")" || panic "smartcard-root-gpg: cannot
 dbg "resolved backing device: $DEV"
 
 # Always detect from the LUKS2 header so custom handling runs whenever a
-# root-gpg token exists on the root device.
+# gpg-token token exists on the root device.
 KEY_SPEC="$(auto_detect_gpg_token "$DEV" || true)"
 if [ -z "$KEY_SPEC" ]; then
-  dbg "no root-gpg token found on root device; exiting GPG token path"
+  dbg "no gpg-token token found on root device; exiting GPG token path"
   exit 0
 fi
 msg "auto-detected token selector: $KEY_SPEC"
