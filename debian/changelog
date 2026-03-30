@@ -1,7 +1,6 @@
-luks-root-smartcard-tools (1.0.29) unstable; urgency=medium
+luks-root-smartcard-tools (1.0.33) unstable; urgency=medium
 
   * change gpg-root to gpg-token
-  * add mkuki.sh
 
  -- JT <jtmoree@users.noreply.github.com>  Sat, 14 Mar 2026 00:00:00 +0000
 

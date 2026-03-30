@@ -14,3 +14,4 @@ Description: Smartcard root unlock for Debian/Ubuntu
  Provides initramfs hooks and boot scripts that unlock the root volume
  using a smartcard.  Supports FIDO2 (systemd-fido2), TPM2 (systemd-tpm2),
  PKCS#11 (systemd-pkcs11), and GPG/scdaemon (gpg-token or keyfile).
+
