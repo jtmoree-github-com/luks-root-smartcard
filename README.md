@@ -2,14 +2,15 @@
 
 **Smartcard-based LUKS root unlock for Debian/Ubuntu initramfs**
 
-Smartcard integration with root LUKS drives can be complex.  This script assists setup with initramfs and LUKS.  Multiple workflows are supported.
+Smartcard integration with root LUKS drives can be complex.  This script integrates smartcard setup and boot with initramfs and LUKS.  Multiple workflows are supported.
 
-- TPM2 workflow (systemd-tpm2)
-- FIDO2 workflow (systemd-fido2)
-- PKCS#11 workflow (systemd-pkcs11)
-- GPG workflow (gpg-token token or GPG key file)
+- [TPM2 workflow](#quick-start-tpm2) (systemd-tpm2)
+- [FIDO2 workflow](#quick-start-fido2) (systemd-fido2)
+- [PKCS#11 workflow](#quick-start-systemd-pkcs11) (systemd-pkcs11)
+- GPG workflow ([gpg-token](#quick-start-gpg-token) token or [GPG key file](#quick-start-gpg-key-file))
+- [Post-boot drive workflow](#quick-start-mount-token-based-drive-after-boot) (gpg-cryptopen / gpg-cryptmount)
 
-Since systemd is not available during boot on many systems we implement a boot process that supports systemd based luks2 smartcard integration without systemd.  This may use a TPM or other types of tokens created by systemd-cryptenroll.  
+Since systemd is not available during boot on many systems this systemd workflow boots systemd based luks2 smartcard integration without systemd in the initrd.  This may use a TPM or other types of tokens created by systemd-cryptenroll.  
 
 The gpg workflow supports the traditional encrypted key file on disk from stock debian/ubuntu and storing the encrypted key in a luks2 header token.
 
@@ -41,6 +42,8 @@ At boot, separate `local-top` scripts handle each workflow:
 | /usr/share/initramfs-tools/scripts/local-top/00-smartcard-root-tpm2 | Boot script for systemd-tpm2 token unlock via cryptsetup token plugin |
 | /usr/share/initramfs-tools/scripts/local-bottom/smartcard-root | Teardown — kills pcscd and cleans up sensitive files |
 | /usr/sbin/gpg-cryptenroll | Helper to generate and store GPG-encrypted key material |
+| /usr/sbin/gpg-cryptopen | Open any LUKS2 volume after boot using a GPG smartcard |
+| /usr/sbin/gpg-cryptmount | Open and mount known LUKS2 volumes after boot for the active user |
 
 ## Supported key types
 
@@ -78,15 +81,15 @@ At boot, separate `local-top` scripts handle each workflow:
 
 Field 3 in crypttab can still be used for stock keyfile workflows. Token workflows in this package are token-driven: the scripts inspect the root LUKS2 header and run whenever matching tokens are present.
 
-Recommended token-mode entry remains `none` for field 3:
+Recommended token-mode workflow is `none` for field 3.  Anything else may yield confusing messages and conflicts:
 
-GPG key file workflow (stock):
+GPG key file workflow (stock debian/ubuntu):
 
 ```
 root_crypt UUID=<uuid> /boot/root.key.gpg luks
 ```
 
-GPG token and pkcs11 workflow:
+token workflow:
 
 ```
 root_crypt UUID=<uuid> none luks
@@ -108,6 +111,23 @@ When a matching smartcard token exists but no smartcard is detected, the user is
 - bypass smartcard and fall back to passphrase unlock.
 
 When matching tokens exist, workflows attempt unlock and on failure continue to the next workflow before passphrase fallback.
+
+## Post-boot naming and mount conventions
+
+- Default mapper name: `luks-<uuid>`
+- Explicit `--name` always overrides the default
+- `gpg-cryptmount` first checks `/etc/crypttab` when a name is provided
+
+Default mount-point selection in `gpg-cryptmount` (first usable):
+
+1. `/run/media/<user>/<mapper>`
+1. `/media/<user>/<mapper>`
+1. `/home/<user>/mnt/<mapper>`
+
+This runtime fallback avoids hardcoding a distro: some Linux flavors prefer
+`/media/<user>` (common on Debian/Ubuntu desktops), while many others prefer
+`/run/media/<user>` (common on Fedora/RHEL/Arch/openSUSE). If neither is
+available, `~/mnt` is always available as a user-owned fallback.
 
 ## Quick start (FIDO2)
 
@@ -191,6 +211,27 @@ gpg --export <recipient> >/etc/cryptsetup-initramfs/pubring.gpg
 
 # Rebuild initramfs
 sudo update-initramfs -u -k "$(uname -r)"
+```
+
+## Quick start (mount token based drive after boot)
+
+```bash
+# Enroll on the drive (same as root — creates a gpg-token in the LUKS2 header)
+sudo gpg-cryptenroll token:auto /dev/<data-drive>
+
+# Later, after boot, unlock it with the smartcard
+sudo gpg-cryptopen /dev/<data-drive>
+# Opens as /dev/mapper/luks-<uuid> by default.
+
+# Or unlock and mount in one step (recommended for desktop users)
+sudo gpg-cryptmount /dev/<data-drive>
+# Accepts either a device spec or a /etc/crypttab name.
+
+# Use a key file stored on disk instead of a LUKS2 token
+sudo gpg-cryptopen /dev/<data-drive> --key-spec file:/etc/keys/data-drive.gpg
+
+# Mount with explicit key file and mount point
+sudo gpg-cryptmount /dev/<data-drive> --key-spec file:/etc/keys/data-drive.gpg --mount-point /home/$USER/mnt/data
 ```
 
 ## Build

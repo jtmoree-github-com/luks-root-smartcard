@@ -15,17 +15,39 @@
 
 set -eu
 
-# ── Stop pcscd so scdaemon can access the card directly ──────────────────────
-# pcscd holds an exclusive lock on the smartcard reader; killing it before
-# any GPG card operation is required for scdaemon to work.
-if sudo systemctl stop pcscd pcscd.socket 2>/dev/null; then
-  echo "Stopped pcscd (will restart on exit)"
-fi
-_pcscd_stopped=1
+# Some systems use scdaemon's built-in CCID path, others require pcscd.
+# The test probes both modes and restores the initial service state on exit.
+_pcscd_initial_active=0
+_pcscd_force_started=0
 
-_cleanup_pcscd() {
-  [ "${_pcscd_stopped:-0}" -eq 1 ] && sudo systemctl start pcscd 2>/dev/null || true
+pcscd_active() {
+  sudo systemctl is-active --quiet pcscd 2>/dev/null || sudo systemctl is-active --quiet pcscd.socket 2>/dev/null
 }
+
+stop_pcscd() {
+  sudo systemctl stop pcscd pcscd.socket 2>/dev/null || true
+}
+
+start_pcscd() {
+  sudo systemctl start pcscd 2>/dev/null || true
+}
+
+probe_card_status() {
+  gpgconf --kill gpg-agent scdaemon 2>/dev/null || true
+  gpg --card-status >/dev/null 2>&1
+}
+
+restore_pcscd_state() {
+  if [ "${_pcscd_initial_active:-0}" -eq 1 ]; then
+    start_pcscd
+  elif [ "${_pcscd_force_started:-0}" -eq 1 ]; then
+    stop_pcscd
+  fi
+}
+
+if pcscd_active; then
+  _pcscd_initial_active=1
+fi
 
 LOOP_FILE=""
 LOOP_DEV=""
@@ -53,7 +75,7 @@ cleanup() {
   [ -n "$LOOP_DEV" ]    && sudo losetup -d "$LOOP_DEV" 2>/dev/null
   [ -n "$LOOP_FILE" ]   && rm -f "$LOOP_FILE"
   [ -n "$WORK" ]        && rm -rf "$WORK"
-  _cleanup_pcscd
+  restore_pcscd_state
 }
 trap cleanup EXIT
 
@@ -76,6 +98,14 @@ else
   die "gpg-cryptenroll not found (not in $SCRIPT_DIR nor in PATH)"
 fi
 
+if [ -x "$SCRIPT_DIR/gpg-cryptopen" ]; then
+  GPG_CRYPTOPEN="$SCRIPT_DIR/gpg-cryptopen"
+elif command -v gpg-cryptopen >/dev/null 2>&1; then
+  GPG_CRYPTOPEN="gpg-cryptopen"
+else
+  die "gpg-cryptopen not found (not in $SCRIPT_DIR nor in PATH)"
+fi
+
 WORK="$(mktemp -d /tmp/test-gpg-file.XXXXXX)"
 chmod 700 "$WORK"
 KEY_FILE="$WORK/root.key.gpg"
@@ -92,13 +122,28 @@ printf '%s' "$PASSPHRASE" | sudo cryptsetup luksFormat --type luks2 --batch-mode
 ok "LUKS2 formatted with passphrase in slot 0"
 
 # ── Step 2: Enroll via gpg-cryptenroll (file output, no token) ───────────────
-# ── Reset scdaemon before any GPG operation ──────────────────────────────────
+# ── Probe smartcard backend mode (pcscd vs direct CCID) ──────────────────────
 echo ""
-echo "=== Step 1b: Reset gpg-agent / scdaemon ==="
-gpgconf --kill gpg-agent scdaemon 2>/dev/null || true
-sleep 1
-gpg --card-status >/dev/null || die "smartcard not accessible after gpg-agent reset — is the card inserted?"
-ok "smartcard accessible"
+echo "=== Step 1b: Probe smartcard backend ==="
+
+if probe_card_status; then
+  ok "smartcard accessible using current service state"
+else
+  echo "Current state failed; trying with pcscd stopped"
+  stop_pcscd
+  if probe_card_status; then
+    ok "smartcard accessible with pcscd stopped (direct CCID)"
+  else
+    echo "Stopped state failed; trying with pcscd started"
+    start_pcscd
+    _pcscd_force_started=1
+    if probe_card_status; then
+      ok "smartcard accessible with pcscd running"
+    else
+      die "smartcard not accessible in either mode (pcscd stopped/running) — is the card inserted and usable by gpg?"
+    fi
+  fi
+fi
 
 echo ""
 echo "=== Step 2: Enroll GPG key file via gpg-cryptenroll ==="
@@ -174,7 +219,27 @@ sudo cryptsetup status "$MAPPER_NAME"
 sudo cryptsetup close "$MAPPER_NAME"
 ok "mapper closed"
 
+# ── Step 6: Validate gpg-cryptopen (file-based flow) ───────────────────────
+echo ""
+echo "=== Step 6: Validate gpg-cryptopen (file-based unlock) ==="
+
+echo ">>> gpg-cryptopen will prompt for your smartcard PIN <<<"
+sudo "$GPG_CRYPTOPEN" "$LOOP_DEV" --name "$MAPPER_NAME" --key-spec "file:$KEY_FILE"
+sudo cryptsetup status "$MAPPER_NAME" | grep 'is active' >/dev/null \
+  || die "gpg-cryptopen: /dev/mapper/$MAPPER_NAME not active after open"
+ok "gpg-cryptopen opened /dev/mapper/$MAPPER_NAME via file:$KEY_FILE"
+
+# Idempotency: second call must exit 0 and report already-open.
+sudo "$GPG_CRYPTOPEN" "$LOOP_DEV" --name "$MAPPER_NAME" --key-spec "file:$KEY_FILE" 2>&1 \
+  | grep -q 'already open' \
+  || die "gpg-cryptopen: expected 'already open' on second call"
+ok "gpg-cryptopen is idempotent (already open)"
+
+sudo cryptsetup close "$MAPPER_NAME"
+ok "mapper closed"
+
 echo ""
 echo "=== ALL TESTS PASSED ==="
 echo "The full GPG file chain works:"
 echo "  gpg-cryptenroll file:root.key.gpg <luks-device> → gpg --decrypt → LUKS unlock"
+echo "  gpg-cryptopen --key-spec file:<path> → luksOpen"

@@ -1,0 +1,362 @@
+#!/bin/sh
+set -eu
+
+usage() {
+  cat <<'EOF'
+Usage: gpg-cryptopen <luks-device> [options]
+
+Decrypts a LUKS2 volume's GPG-encrypted key (from a LUKS2 header token or a
+GPG key file) using a smartcard, then opens the device via cryptsetup luksOpen.
+
+This is a post-boot companion to gpg-cryptenroll and the initramfs boot scripts.
+Use it to unlock secondary encrypted drives after boot using the same GPG
+smartcard that protects the key material.
+
+Required:
+  <luks-device>         LUKS block device (e.g. /dev/sdb2, UUID=..., LABEL=...,
+                        PARTUUID=..., PARTLABEL=...)
+
+Options:
+  --name <mapper-name>  Name to use for the device mapper target.
+                        [default: luks-<uuid> from the resolved LUKS device]
+  --key-spec <spec>     Where to find the GPG-encrypted key blob:
+                          token:auto      (default) auto-detect gpg-token in
+                                          LUKS2 header
+                          token:NN        specific LUKS2 token id (0-31)
+                          file:/abs/path  path to a .gpg encrypted key file
+  --debug               Print diagnostic information
+  --help                Show this help text
+
+Notes:
+  - Root privileges are required (cryptsetup luksOpen).
+  - GPG operations run as SUDO_USER when invoked via sudo, so the real user's
+    keyring and smartcard agent are used automatically.
+  - The decrypted key material is held only in /dev/shm and removed after use.
+  - If the device is already open the script exits cleanly (idempotent).
+EOF
+}
+
+LUKS_DEVICE_SPEC=""
+LUKS_DEVICE=""
+MAPPER_NAME=""
+KEY_SPEC="token:auto"
+DEBUG=0
+
+dbg() { [ "$DEBUG" -eq 1 ] && echo "gpg-cryptopen: DEBUG: $*" >&2 || true; }
+die() { echo "gpg-cryptopen: $*" >&2; exit 1; }
+msg() { echo "gpg-cryptopen: $*" >&2; }
+
+# ---------------------------------------------------------------------------
+# Run GPG operations as the real user when invoked via sudo.
+# ---------------------------------------------------------------------------
+run_as_user() {
+  if [ -n "${SUDO_USER:-}" ]; then
+    _home="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
+    _rtdir="/run/user/$(id -u "$SUDO_USER")"
+    dbg "run_as_user: SUDO_USER=$SUDO_USER HOME=$_home XDG_RUNTIME_DIR=$_rtdir cmd=$*"
+    runuser -u "$SUDO_USER" -- \
+      env \
+        HOME="$_home" \
+        XDG_RUNTIME_DIR="$_rtdir" \
+        GPG_TTY="$(tty 2>/dev/null || true)" \
+        DISPLAY="${DISPLAY:-}" \
+        DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-}" \
+      "$@"
+  else
+    dbg "run_as_user: no SUDO_USER, running as $(id -un): cmd=$*"
+    "$@"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+json_value() {
+  _jv_json="$1"
+  _jv_key="$2"
+  _jv_flat="$(printf '%s' "$_jv_json" | tr -d '\n')"
+  _jv_after="${_jv_flat#*\"${_jv_key}\":\"}"
+  [ "$_jv_after" != "$_jv_flat" ] || return 1
+  _jv_val="${_jv_after%%\"*}"
+  printf '%s' "$_jv_val"
+}
+
+resolve_device_spec() {
+  _spec="$1"
+  case "$_spec" in
+    UUID=*)      blkid -U "${_spec#UUID=}" 2>/dev/null || true ;;
+    LABEL=*)     blkid -L "${_spec#LABEL=}" 2>/dev/null || true ;;
+    PARTUUID=*)  echo "/dev/disk/by-partuuid/${_spec#PARTUUID=}" ;;
+    PARTLABEL=*) echo "/dev/disk/by-partlabel/${_spec#PARTLABEL=}" ;;
+    *)           echo "$_spec" ;;
+  esac
+}
+
+get_device_uuid() {
+  _dev="$1"
+  _uuid="$(blkid -s UUID -o value "$_dev" 2>/dev/null | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]' || true)"
+  [ -n "$_uuid" ] || return 1
+  printf '%s' "$_uuid"
+}
+
+resolve_crypttab_name_for_device() {
+  _target_dev="$1"
+  [ -r /etc/crypttab ] || return 1
+  _target_real="$(readlink -f "$_target_dev" 2>/dev/null || echo "$_target_dev")"
+
+  while IFS= read -r _line; do
+    case "$_line" in ''|'#'*) continue ;; esac
+    set -- $_line
+    [ "$#" -ge 2 ] || continue
+    _ct_name="$1"; _ct_source="$2"
+    _ct_dev="$(resolve_device_spec "$_ct_source")"
+    [ -n "$_ct_dev" ] || continue
+    _ct_real="$(readlink -f "$_ct_dev" 2>/dev/null || echo "$_ct_dev")"
+    if [ "$_ct_real" = "$_target_real" ]; then
+      echo "$_ct_name"
+      return 0
+    fi
+  done </etc/crypttab
+  return 1
+}
+
+# Scan LUKS2 header for the first gpg-token token; print "token:N" on success.
+auto_detect_gpg_token() {
+  _dev="$1"
+  _i=0
+  while [ "$_i" -lt 32 ]; do
+    _json="$(cryptsetup token export --token-id "$_i" "$_dev" 2>/dev/null || true)"
+    if [ -n "$_json" ]; then
+      _t="$(json_value "$_json" "type" || true)"
+      dbg "token $_i type=${_t:-unknown}"
+      if [ "$_t" = "gpg-token" ]; then
+        echo "token:$_i"
+        return 0
+      fi
+    fi
+    _i=$(( _i + 1 ))
+  done
+  return 1
+}
+
+# Extract the GPG-encrypted key blob into a temp file.
+# For token:N/token:auto: decoded from base64 in the LUKS2 header.
+# For file:/path: copied directly from disk.
+# Prints the path to the temp file on success.
+extract_key_blob() {
+  _dev="$1"
+  _selector="$2"
+
+  case "$_selector" in
+    file:/*)
+      _fpath="${_selector#file:}"
+      [ -r "$_fpath" ] || die "key file not readable: $_fpath"
+      _tmp="$(mktemp /dev/shm/gpg-blob.XXXXXX)"
+      chmod 600 "$_tmp"
+      cat "$_fpath" >"$_tmp"
+      echo "$_tmp"
+      return 0
+      ;;
+  esac
+
+  # Token mode — extract base64 blob from LUKS2 header and decode it.
+  _token_id="${_selector#token:}"
+  _b64=""
+
+  if [ "$_token_id" = "auto" ]; then
+    _i=0
+    while [ "$_i" -lt 32 ]; do
+      _json="$(cryptsetup token export --token-id "$_i" "$_dev" 2>/dev/null || true)"
+      if [ -n "$_json" ]; then
+        _t="$(json_value "$_json" "type" || true)"
+        if [ "$_t" = "gpg-token" ]; then
+          _b64="$(json_value "$_json" "gpg-key" || true)"
+          [ -n "$_b64" ] && break
+        fi
+      fi
+      _i=$(( _i + 1 ))
+    done
+  else
+    _json="$(cryptsetup token export --token-id "$_token_id" "$_dev" 2>/dev/null || true)"
+    if [ -n "$_json" ]; then
+      _t="$(json_value "$_json" "type" || true)"
+      if [ "$_t" = "gpg-token" ]; then
+        _b64="$(json_value "$_json" "gpg-key" || true)"
+      fi
+    fi
+  fi
+
+  [ -n "$_b64" ] || return 1
+
+  _tmp="$(mktemp /dev/shm/gpg-blob.XXXXXX)"
+  chmod 600 "$_tmp"
+  if ! printf '%s\n' "$_b64" | base64 -d >"$_tmp" 2>/dev/null; then
+    _b64f="$(mktemp /dev/shm/gpg-b64.XXXXXX)"
+    printf '%s\n' "$_b64" >"$_b64f"
+    if ! base64 -d <"$_b64f" >"$_tmp" 2>/dev/null; then
+      if ! openssl base64 -d -in "$_b64f" -out "$_tmp" 2>/dev/null; then
+        rm -f "$_tmp" "$_b64f"
+        return 1
+      fi
+    fi
+    rm -f "$_b64f"
+  fi
+  echo "$_tmp"
+}
+
+check_smartcard() {
+  dbg "check_smartcard: probing via gpg --card-status"
+  _log="$(mktemp /dev/shm/gpg-card-status.XXXXXX)"
+  if run_as_user gpg --batch --no-tty --card-status >"$_log" 2>&1; then
+    dbg "check_smartcard: success"
+    rm -f "$_log"
+    return 0
+  fi
+  dbg "check_smartcard: failed"
+  if [ "$DEBUG" -eq 1 ]; then
+    sed 's/^/  card-status: /' "$_log" >&2
+  fi
+  rm -f "$_log"
+  return 1
+}
+
+decrypt_gpg_blob() {
+  _blob="$1"
+  _out="$2"
+  # The blob temp file is root-owned 600.  Open it here (as root) and pipe via
+  # stdin so SUDO_USER's gpg process receives the data without needing direct
+  # read access to the file.  The output redirect is likewise opened by root.
+  run_as_user gpg --no-options --trust-model=always --batch --decrypt >"$_out" <"$_blob"
+}
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+
+[ "$#" -ge 1 ] || { usage >&2; exit 2; }
+
+case "$1" in --help|-h) usage; exit 0 ;; esac
+
+LUKS_DEVICE_SPEC="$1"
+shift
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --name)
+      MAPPER_NAME="${2:-}"
+      shift 2
+      ;;
+    --key-spec)
+      KEY_SPEC="${2:-}"
+      shift 2
+      ;;
+    --debug)
+      DEBUG=1
+      shift
+      ;;
+    --help|-h)
+      usage; exit 0
+      ;;
+    *)
+      die "unknown option: $1"
+      ;;
+  esac
+done
+
+# ---------------------------------------------------------------------------
+# Pre-flight checks
+# ---------------------------------------------------------------------------
+
+[ "$(id -u)" -eq 0 ] || die "root privileges are required (try: sudo gpg-cryptopen ...)"
+command -v gpg         >/dev/null 2>&1 || die "gpg is not installed"
+command -v cryptsetup  >/dev/null 2>&1 || die "cryptsetup is not installed"
+command -v base64      >/dev/null 2>&1 || die "base64 is not installed"
+
+LUKS_DEVICE="$(resolve_device_spec "$LUKS_DEVICE_SPEC")"
+[ -n "$LUKS_DEVICE" ] || die "cannot resolve device: $LUKS_DEVICE_SPEC"
+[ -b "$LUKS_DEVICE" ] || die "not a block device: $LUKS_DEVICE"
+cryptsetup isLuks "$LUKS_DEVICE" 2>/dev/null || die "not a LUKS device: $LUKS_DEVICE"
+dbg "resolved device: $LUKS_DEVICE"
+
+# ---------------------------------------------------------------------------
+# Resolve mapper name
+# ---------------------------------------------------------------------------
+
+if [ -z "$MAPPER_NAME" ]; then
+  DEV_UUID="$(get_device_uuid "$LUKS_DEVICE" || true)"
+  [ -n "$DEV_UUID" ] || die "unable to determine UUID for $LUKS_DEVICE"
+  MAPPER_NAME="luks-$DEV_UUID"
+  _ct_name="$(resolve_crypttab_name_for_device "$LUKS_DEVICE" || true)"
+  if [ -n "$_ct_name" ] && [ "$_ct_name" != "$MAPPER_NAME" ]; then
+    dbg "crypttab name for $LUKS_DEVICE is $_ct_name; using convention name $MAPPER_NAME"
+  fi
+fi
+dbg "mapper name: $MAPPER_NAME"
+
+# ---------------------------------------------------------------------------
+# Idempotency check
+# ---------------------------------------------------------------------------
+
+if cryptsetup status "$MAPPER_NAME" >/dev/null 2>&1; then
+  msg "/dev/mapper/$MAPPER_NAME is already open"
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Resolve key-spec
+# ---------------------------------------------------------------------------
+
+case "$KEY_SPEC" in
+  token:auto)
+    dbg "auto-detecting gpg-token in LUKS2 header of $LUKS_DEVICE"
+    DETECTED="$(auto_detect_gpg_token "$LUKS_DEVICE" || true)"
+    [ -n "$DETECTED" ] || die "no gpg-token found in LUKS2 header of $LUKS_DEVICE"
+    KEY_SPEC="$DETECTED"
+    msg "found token selector $KEY_SPEC"
+    ;;
+  token:[0-9]|token:[0-9][0-9])
+    dbg "using explicit token id: ${KEY_SPEC#token:}"
+    ;;
+  file:/*)
+    [ -r "${KEY_SPEC#file:}" ] || die "key file not readable: ${KEY_SPEC#file:}"
+    ;;
+  file:*)
+    die "--key-spec file path must be absolute (e.g. file:/path/to/key.gpg)"
+    ;;
+  *)
+    die "--key-spec must be token:auto, token:NN, or file:/abs/path"
+    ;;
+esac
+
+# ---------------------------------------------------------------------------
+# Smartcard check
+# ---------------------------------------------------------------------------
+
+msg "checking for smartcard..."
+check_smartcard || die "no smartcard detected; insert the card and try again"
+msg "smartcard detected"
+
+# ---------------------------------------------------------------------------
+# Extract blob, decrypt, and open
+# ---------------------------------------------------------------------------
+
+BLOB="$(extract_key_blob "$LUKS_DEVICE" "$KEY_SPEC")" \
+  || die "failed to extract encrypted key blob ($KEY_SPEC from $LUKS_DEVICE)"
+
+TMP_KEY="$(mktemp /dev/shm/gpg-plainkey.XXXXXX)"
+chmod 600 "$TMP_KEY"
+
+cleanup() {
+  rm -f "$TMP_KEY" "${BLOB:-}"
+}
+trap cleanup EXIT INT TERM
+
+msg "decrypting key with GPG (smartcard interaction may be required)..."
+decrypt_gpg_blob "$BLOB" "$TMP_KEY" || die "GPG decryption failed"
+msg "decryption succeeded"
+
+msg "opening $LUKS_DEVICE as /dev/mapper/$MAPPER_NAME ..."
+cryptsetup luksOpen "$LUKS_DEVICE" "$MAPPER_NAME" --key-file "$TMP_KEY" \
+  || die "cryptsetup luksOpen failed"
+msg "/dev/mapper/$MAPPER_NAME is now open"

@@ -1,0 +1,286 @@
+#!/bin/sh
+set -eu
+
+usage() {
+  cat <<'EOF'
+Usage: gpg-cryptmount <name|luks-device> [options]
+
+Convenience utility for non-root workflows (invoked via sudo):
+1. Resolves a known drive by /etc/crypttab name or explicit device spec.
+2. Ensures the LUKS mapping is open via gpg-cryptopen.
+3. Mounts /dev/mapper/<name> under a user mount location.
+
+Positional:
+  <name|luks-device>    Either:
+                        - a crypttab name (field 1 in /etc/crypttab), or
+                        - a device spec (/dev/..., UUID=..., LABEL=..., PARTUUID=..., PARTLABEL=...)
+
+Options:
+  --key-spec <spec>     Passed through to gpg-cryptopen (token:auto|token:NN|file:/abs/path)
+  --name <mapper-name>  Explicit mapper name override (default: luks-<uuid>)
+  --mount-point <path>  Explicit mount point override
+  --mount-options <o>   Extra mount options (comma-separated)
+  --no-open             Do not call gpg-cryptopen; only mount existing mapper
+  --debug               Print diagnostic output
+  --help                Show this help text
+
+Default mount-point selection (first usable):
+  1) /run/media/<user>/<mapper>
+  2) /media/<user>/<mapper>
+  3) /home/<user>/mnt/<mapper>
+
+Notes:
+  - Root is required (mount and luksOpen operations).
+  - SUDO_USER is used to derive the real desktop/login user for mount location.
+EOF
+}
+
+TARGET=""
+KEY_SPEC=""
+MAPPER_NAME=""
+MOUNT_POINT=""
+MOUNT_OPTIONS=""
+NO_OPEN=0
+DEBUG=0
+DEBUG_ARG=""
+
+msg() { echo "gpg-cryptmount: $*" >&2; }
+dbg() { [ "$DEBUG" -eq 1 ] && echo "gpg-cryptmount: DEBUG: $*" >&2 || true; }
+die() { echo "gpg-cryptmount: $*" >&2; exit 1; }
+
+is_device_spec() {
+  case "$1" in
+    /dev/*|UUID=*|LABEL=*|PARTUUID=*|PARTLABEL=*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+resolve_device_spec() {
+  _spec="$1"
+  case "$_spec" in
+    UUID=*)      blkid -U "${_spec#UUID=}" 2>/dev/null || true ;;
+    LABEL=*)     blkid -L "${_spec#LABEL=}" 2>/dev/null || true ;;
+    PARTUUID=*)  echo "/dev/disk/by-partuuid/${_spec#PARTUUID=}" ;;
+    PARTLABEL=*) echo "/dev/disk/by-partlabel/${_spec#PARTLABEL=}" ;;
+    *)           echo "$_spec" ;;
+  esac
+}
+
+lookup_crypttab_source_by_name() {
+  _name="$1"
+  [ -r /etc/crypttab ] || return 1
+  while IFS= read -r _line; do
+    case "$_line" in ''|'#'*) continue ;; esac
+    set -- $_line
+    [ "$#" -ge 2 ] || continue
+    [ "$1" = "$_name" ] || continue
+    echo "$2"
+    return 0
+  done </etc/crypttab
+  return 1
+}
+
+get_device_uuid() {
+  _dev="$1"
+  _uuid="$(blkid -s UUID -o value "$_dev" 2>/dev/null | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]' || true)"
+  [ -n "$_uuid" ] || return 1
+  printf '%s' "$_uuid"
+}
+
+get_real_user() {
+  if [ -n "${SUDO_USER:-}" ]; then
+    printf '%s' "$SUDO_USER"
+  else
+    id -un
+  fi
+}
+
+get_user_home() {
+  _u="$1"
+  getent passwd "$_u" | cut -d: -f6
+}
+
+ensure_dir() {
+  _d="$1"
+  _u="$2"
+  _g="$3"
+  mkdir -p "$_d"
+  chown "$_u:$_g" "$_d" 2>/dev/null || true
+  chmod 755 "$_d" 2>/dev/null || true
+}
+
+choose_mount_point() {
+  _mapper="$1"
+  _user="$2"
+  _home="$3"
+
+  if [ -n "$MOUNT_POINT" ]; then
+    printf '%s' "$MOUNT_POINT"
+    return 0
+  fi
+
+  _cand1="/run/media/$_user/$_mapper"
+  _cand2="/media/$_user/$_mapper"
+  _cand3="$_home/mnt/$_mapper"
+
+  _parent1="$(dirname "$_cand1")"
+  _parent2="$(dirname "$_cand2")"
+  _parent3="$(dirname "$_cand3")"
+
+  if [ -d "$_parent1" ] || mkdir -p "$_parent1" 2>/dev/null; then
+    printf '%s' "$_cand1"
+    return 0
+  fi
+  if [ -d "$_parent2" ] || mkdir -p "$_parent2" 2>/dev/null; then
+    printf '%s' "$_cand2"
+    return 0
+  fi
+
+  mkdir -p "$_parent3"
+  printf '%s' "$_cand3"
+}
+
+fs_mount_opts() {
+  _dev="$1"
+  _user="$2"
+  _uid="$3"
+  _gid="$4"
+  _fstype="$(blkid -s TYPE -o value "$_dev" 2>/dev/null || true)"
+  case "$_fstype" in
+    vfat|msdos|exfat)
+      printf 'uid=%s,gid=%s,umask=022' "$_uid" "$_gid"
+      ;;
+    ntfs|ntfs3)
+      printf 'uid=%s,gid=%s,umask=022' "$_uid" "$_gid"
+      ;;
+    *)
+      printf ''
+      ;;
+  esac
+}
+
+[ "$#" -ge 1 ] || { usage >&2; exit 2; }
+case "$1" in --help|-h) usage; exit 0 ;; esac
+TARGET="$1"
+shift
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --key-spec)
+      KEY_SPEC="${2:-}"
+      shift 2
+      ;;
+    --name)
+      MAPPER_NAME="${2:-}"
+      shift 2
+      ;;
+    --mount-point)
+      MOUNT_POINT="${2:-}"
+      shift 2
+      ;;
+    --mount-options)
+      MOUNT_OPTIONS="${2:-}"
+      shift 2
+      ;;
+    --no-open)
+      NO_OPEN=1
+      shift
+      ;;
+    --debug)
+      DEBUG=1
+      DEBUG_ARG="--debug"
+      shift
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      die "unknown option: $1"
+      ;;
+  esac
+done
+
+[ "$(id -u)" -eq 0 ] || die "root privileges are required (run with sudo)"
+command -v cryptsetup >/dev/null 2>&1 || die "cryptsetup is not installed"
+command -v mount >/dev/null 2>&1 || die "mount is not installed"
+command -v findmnt >/dev/null 2>&1 || die "findmnt is not installed"
+
+REAL_USER="$(get_real_user)"
+USER_HOME="$(get_user_home "$REAL_USER")"
+[ -n "$USER_HOME" ] || die "could not determine home directory for user $REAL_USER"
+USER_UID="$(id -u "$REAL_USER")"
+USER_GID="$(id -g "$REAL_USER")"
+
+if is_device_spec "$TARGET"; then
+  LUKS_SPEC="$TARGET"
+else
+  LUKS_SPEC="$(lookup_crypttab_source_by_name "$TARGET" || true)"
+  [ -n "$LUKS_SPEC" ] || die "name '$TARGET' not found in /etc/crypttab"
+fi
+
+LUKS_DEVICE="$(resolve_device_spec "$LUKS_SPEC")"
+[ -n "$LUKS_DEVICE" ] || die "cannot resolve device: $LUKS_SPEC"
+[ -b "$LUKS_DEVICE" ] || die "not a block device: $LUKS_DEVICE"
+cryptsetup isLuks "$LUKS_DEVICE" 2>/dev/null || die "not a LUKS device: $LUKS_DEVICE"
+
+if [ -z "$MAPPER_NAME" ]; then
+  DEV_UUID="$(get_device_uuid "$LUKS_DEVICE" || true)"
+  [ -n "$DEV_UUID" ] || die "unable to determine UUID for $LUKS_DEVICE"
+  MAPPER_NAME="luks-$DEV_UUID"
+fi
+MAPPER_DEV="/dev/mapper/$MAPPER_NAME"
+
+dbg "target=$TARGET luks_spec=$LUKS_SPEC luks_device=$LUKS_DEVICE mapper=$MAPPER_NAME"
+
+if findmnt -rn -S "$MAPPER_DEV" >/dev/null 2>&1; then
+  _cur_mnt="$(findmnt -rn -S "$MAPPER_DEV" -o TARGET | head -n 1)"
+  msg "$MAPPER_DEV is already mounted at $_cur_mnt"
+  printf '%s\n' "$_cur_mnt"
+  exit 0
+fi
+
+if [ "$NO_OPEN" -eq 0 ]; then
+  OPEN_CMD="gpg-cryptopen"
+  if [ -x "$(dirname "$0")/gpg-cryptopen" ]; then
+    OPEN_CMD="$(dirname "$0")/gpg-cryptopen"
+  fi
+
+  if ! cryptsetup status "$MAPPER_NAME" >/dev/null 2>&1; then
+    msg "opening $LUKS_DEVICE as $MAPPER_NAME"
+    if [ -n "$KEY_SPEC" ]; then
+      "$OPEN_CMD" "$LUKS_DEVICE" --name "$MAPPER_NAME" --key-spec "$KEY_SPEC" $DEBUG_ARG
+    else
+      "$OPEN_CMD" "$LUKS_DEVICE" --name "$MAPPER_NAME" $DEBUG_ARG
+    fi
+  else
+    msg "$MAPPER_DEV is already open"
+  fi
+else
+  cryptsetup status "$MAPPER_NAME" >/dev/null 2>&1 || die "--no-open set but $MAPPER_DEV is not active"
+fi
+
+[ -b "$MAPPER_DEV" ] || die "mapper device missing after open: $MAPPER_DEV"
+
+TARGET_MOUNT="$(choose_mount_point "$MAPPER_NAME" "$REAL_USER" "$USER_HOME")"
+ensure_dir "$TARGET_MOUNT" "$REAL_USER" "$USER_GID"
+
+BASE_OPTS="$(fs_mount_opts "$MAPPER_DEV" "$REAL_USER" "$USER_UID" "$USER_GID")"
+OPTS="$BASE_OPTS"
+if [ -n "$MOUNT_OPTIONS" ]; then
+  if [ -n "$OPTS" ]; then
+    OPTS="$OPTS,$MOUNT_OPTIONS"
+  else
+    OPTS="$MOUNT_OPTIONS"
+  fi
+fi
+
+msg "mounting $MAPPER_DEV at $TARGET_MOUNT"
+if [ -n "$OPTS" ]; then
+  mount -o "$OPTS" "$MAPPER_DEV" "$TARGET_MOUNT"
+else
+  mount "$MAPPER_DEV" "$TARGET_MOUNT"
+fi
+
+msg "mounted $MAPPER_DEV at $TARGET_MOUNT"
+printf '%s\n' "$TARGET_MOUNT"
