@@ -1,0 +1,3 @@
+Tests: helper-script-syntax
+Depends: @
+Restrictions: superficial

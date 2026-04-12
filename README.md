@@ -241,6 +241,47 @@ cd luks-root-smartcard
 ./scripts/build-deb.sh
 ```
 
+Build Launchpad-ready source artifacts and rotate top changelog entry for a target Ubuntu series:
+
+```bash
+./scripts/build-ppa-source.sh --series noble --ppa-owner jtmoree --ppa-name security-tools
+```
+
+For Jammy, switch the series:
+
+```bash
+./scripts/build-ppa-source.sh --series jammy --ppa-rev 2 --ppa-owner jtmoree --ppa-name security-tools
+```
+
+Set Launchpad defaults once so you do not need to pass owner/name every time:
+
+```bash
+mkdir -p ~/.config/luks-root-smartcard
+cat > ~/.config/luks-root-smartcard/ppa.env <<'EOF'
+LUKS_PPA_OWNER=jtmoree
+LUKS_PPA_NAME=security-tools
+LUKS_DEBSIGN_KEYID=<your-gpg-keyid-or-fingerprint>
+EOF
+```
+
+After that, `--ppa-owner` and `--ppa-name` become optional:
+
+```bash
+./scripts/build-ppa-source.sh --series noble
+```
+
+If multiple secret keys exist, you can override the signer key per run:
+
+```bash
+./scripts/build-ppa-source.sh --series noble --sign-key <your-gpg-keyid-or-fingerprint>
+```
+
+If your local signing key is not configured yet, build unsigned source artifacts for preflight checks:
+
+```bash
+./scripts/build-ppa-source.sh --series noble --unsigned
+```
+
 Use the optional bump flag to increment patch version before building:
 
 ```bash

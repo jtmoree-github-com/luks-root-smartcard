@@ -6,12 +6,31 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 cd "$PROJECT_ROOT"
 
-BUMP_MODE="${1:-}"
+BUMP_MODE=""
+BUILD_MODE="binary"
+
+for arg in "$@"; do
+	case "$arg" in
+		bump|--bump)
+			BUMP_MODE="bump"
+			;;
+		source|--source)
+			BUILD_MODE="source"
+			;;
+		binary|--binary)
+			BUILD_MODE="binary"
+			;;
+		*)
+			echo "Usage: $0 [bump|--bump] [source|--source|binary|--binary]" >&2
+			exit 2
+			;;
+	esac
+done
 
 case "$BUMP_MODE" in
 	"" )
 		;;
-	bump|--bump)
+	bump)
 		# Increment patch version in debian/changelog when explicitly requested.
 		CL="debian/changelog"
 		cur="$(head -1 "$CL" | sed -n 's/.*(\([^)]*\)).*/\1/p')"
@@ -24,10 +43,6 @@ case "$BUMP_MODE" in
 		sed -i "1s/($cur)/($new)/" "$CL"
 		echo "Version: $cur -> $new"
 		;;
-	*)
-		echo "Usage: $0 [bump|--bump]" >&2
-		exit 2
-		;;
 esac
 
 if [ -z "$BUMP_MODE" ]; then
@@ -35,8 +50,13 @@ if [ -z "$BUMP_MODE" ]; then
 	echo "Version unchanged: $cur"
 fi
 
-echo "[1/2] Building package"
-dpkg-buildpackage -us -uc -b
+if [ "$BUILD_MODE" = "source" ]; then
+	echo "[1/2] Building source package"
+	dpkg-buildpackage -S -sa
+else
+	echo "[1/2] Building binary package"
+	dpkg-buildpackage -us -uc -b
+fi
 
 echo "[2/2] Artifacts"
 ls -1 "$(dirname "$PROJECT_ROOT")"/luks-root-smartcard-tools_* || true
