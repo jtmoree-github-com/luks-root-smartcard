@@ -247,6 +247,27 @@ Build Launchpad-ready source artifacts and rotate top changelog entry for a targ
 ./scripts/build-ppa-source.sh --series noble --ppa-owner jtmoree --ppa-name security-tools
 ```
 
+For the current development series (questing), switch the series:
+
+```bash
+./scripts/build-ppa-source.sh --series questing --ppa-rev 1 --ppa-owner jtmoree --ppa-name security-tools
+```
+
+For the last LTS, use `lts` (currently maps to noble):
+
+```bash
+./scripts/build-ppa-source.sh --series lts --ppa-rev 2 --ppa-owner jtmoree --ppa-name security-tools
+```
+
+You can change what `lts` maps to in your local config (useful when the next
+LTS is released):
+
+```bash
+# Example: switch lts alias to the next LTS when it becomes available
+LUKS_LTS_SERIES=<new-lts-codename>
+LUKS_LTS_SERIES_NUM=26.04
+```
+
 For Jammy, switch the series:
 
 ```bash
@@ -261,6 +282,8 @@ cat > ~/.config/luks-root-smartcard/ppa.env <<'EOF'
 LUKS_PPA_OWNER=jtmoree
 LUKS_PPA_NAME=security-tools
 LUKS_DEBSIGN_KEYID=<your-gpg-keyid-or-fingerprint>
+LUKS_LTS_SERIES=noble
+LUKS_LTS_SERIES_NUM=24.04
 EOF
 ```
 

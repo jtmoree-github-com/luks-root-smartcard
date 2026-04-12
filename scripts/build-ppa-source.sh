@@ -11,18 +11,20 @@ PPA_REV="1"
 PPA_OWNER="${LUKS_PPA_OWNER:-${LP_PPA_OWNER:-}}"
 PPA_NAME="${LUKS_PPA_NAME:-${LP_PPA_NAME:-}}"
 SIGN_KEY="${LUKS_DEBSIGN_KEYID:-${DEBSIGN_KEYID:-}}"
+LTS_SERIES="${LUKS_LTS_SERIES:-noble}"
+LTS_SERIES_NUM="${LUKS_LTS_SERIES_NUM:-24.04}"
 UBUNTU_SERIES_NUM=""
 NO_BUILD=0
 UNSIGNED=0
 
 usage() {
   cat <<'EOF'
-Usage: build-ppa-source.sh --series <noble|jammy> [options]
+Usage: build-ppa-source.sh --series <questing|noble|jammy|lts> [options]
 
 Prepares debian/changelog for Launchpad PPA upload and optionally builds source artifacts.
 
 Required:
-  --series <name>          Ubuntu series name (noble or jammy)
+  --series <name>          Ubuntu series name (questing, noble, jammy, or lts)
 
 Options:
   --ppa-rev <n>            PPA revision in version suffix (default: 1)
@@ -43,9 +45,13 @@ Default config file:
     LUKS_PPA_OWNER=jtmoree
     LUKS_PPA_NAME=<ppa-name>
     LUKS_DEBSIGN_KEYID=<keyid-or-fingerprint>
+    LUKS_LTS_SERIES=noble
+    LUKS_LTS_SERIES_NUM=24.04
 
 Examples:
   ./scripts/build-ppa-source.sh --series noble --ppa-owner jtmoree --ppa-name security-tools
+  ./scripts/build-ppa-source.sh --series questing --ppa-rev 1
+  ./scripts/build-ppa-source.sh --series lts --ppa-rev 2
   ./scripts/build-ppa-source.sh --series jammy --ppa-rev 2 --no-build
 EOF
 }
@@ -56,6 +62,8 @@ if [ -r "$CONFIG_FILE" ]; then
   PPA_OWNER="${PPA_OWNER:-${LUKS_PPA_OWNER:-${LP_PPA_OWNER:-}}}"
   PPA_NAME="${PPA_NAME:-${LUKS_PPA_NAME:-${LP_PPA_NAME:-}}}"
   SIGN_KEY="${SIGN_KEY:-${LUKS_DEBSIGN_KEYID:-${DEBSIGN_KEYID:-}}}"
+  LTS_SERIES="${LTS_SERIES:-${LUKS_LTS_SERIES:-noble}}"
+  LTS_SERIES_NUM="${LTS_SERIES_NUM:-${LUKS_LTS_SERIES_NUM:-24.04}}"
 fi
 
 while [ "$#" -gt 0 ]; do
@@ -106,14 +114,21 @@ done
 
 [ -n "$SERIES" ] || { echo "--series is required" >&2; usage >&2; exit 2; }
 case "$SERIES" in
+  questing)
+    DEFAULT_UBUNTU_SERIES_NUM="25.10"
+    ;;
   noble)
     DEFAULT_UBUNTU_SERIES_NUM="24.04"
+    ;;
+  lts)
+    SERIES="$LTS_SERIES"
+    DEFAULT_UBUNTU_SERIES_NUM="$LTS_SERIES_NUM"
     ;;
   jammy)
     DEFAULT_UBUNTU_SERIES_NUM="22.04"
     ;;
   *)
-    echo "Unsupported series: $SERIES (supported: noble, jammy)" >&2
+    echo "Unsupported series: $SERIES (supported: questing, noble, jammy, lts)" >&2
     exit 2
     ;;
 esac
