@@ -49,6 +49,7 @@ OUTPUT_PATH=""
 DELETE_OUTPUT=0
 DEBUG=0
 ENROLLED_KEYSLOT=""
+IS_ROOT_LUKS_DEVICE=0
 
 dbg() { [ "$DEBUG" -eq 1 ] && echo "[debug] $*" >&2 || true; }
 
@@ -212,6 +213,31 @@ resolve_crypttab_name_for_device() {
   return 1
 }
 
+is_root_luks_device() {
+  _target_dev="$1"
+  _target_real="$(readlink -f "$_target_dev" 2>/dev/null || echo "$_target_dev")"
+
+  _root_src="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
+  [ -n "$_root_src" ] || return 1
+
+  case "$_root_src" in
+    /dev/mapper/*)
+      _root_name="${_root_src#/dev/mapper/}"
+      _root_backing="$(cryptsetup status "$_root_name" 2>/dev/null | awk '/^[[:space:]]*device:[[:space:]]+/ { print $2; exit }')"
+      [ -n "$_root_backing" ] || return 1
+      _root_real="$(readlink -f "$_root_backing" 2>/dev/null || echo "$_root_backing")"
+      ;;
+    /dev/*)
+      _root_real="$(readlink -f "$_root_src" 2>/dev/null || echo "$_root_src")"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+
+  [ "$_target_real" = "$_root_real" ]
+}
+
 print_crypttab_guidance() {
   _desired_key="$1"
   _desired_opts="$2"
@@ -362,6 +388,13 @@ shift 2
 # Fail fast: verify that the target resolves to an existing block device
 # before processing any additional options or doing any key operations.
 LUKS_DEVICE="$(resolve_device_spec "$LUKS_DEVICE_SPEC")"
+
+if is_root_luks_device "$LUKS_DEVICE"; then
+  IS_ROOT_LUKS_DEVICE=1
+  dbg "detected root LUKS target: $LUKS_DEVICE"
+else
+  dbg "detected non-root LUKS target: $LUKS_DEVICE"
+fi
 
 # Modifying LUKS keyslots/tokens requires root privileges.
 [ "$(id -u)" -eq 0 ] || die "root privileges are required to enroll keys/tokens on $LUKS_DEVICE"
@@ -608,7 +641,7 @@ else
   echo "Temporary plaintext key removed from tmpfs."
 fi
 
-if [ "$DELETE_OUTPUT" -eq 0 ] && [ "$TOKEN_MODE" -eq 0 ]; then
+if [ "$IS_ROOT_LUKS_DEVICE" -eq 1 ] && [ "$DELETE_OUTPUT" -eq 0 ] && [ "$TOKEN_MODE" -eq 0 ]; then
   WARN_TARGET="$(resolve_crypttab_name_for_device "$LUKS_DEVICE" || true)"
   [ -n "$WARN_TARGET" ] || WARN_TARGET="$(basename "$LUKS_DEVICE")"
 cat >&2 <<NOTE
@@ -624,9 +657,11 @@ normally via the smartcard at boot.
 NOTE
 fi
 
+if [ "$IS_ROOT_LUKS_DEVICE" -eq 1 ]; then
 cat >&2 <<'NOTE'
 
 Example: rebuild initramfs for the running kernel:
 
   update-initramfs -u -k "$(uname -r)"
 NOTE
+fi

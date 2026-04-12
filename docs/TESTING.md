@@ -6,6 +6,7 @@ Automated test scripts:
 
 - `scripts/test-gpg-file-chain.sh`
 - `scripts/test-gpg-token-chain.sh`
+- `scripts/test-gpg-mount-chain.sh`
 - `scripts/test-fido2-chain.sh`
 - `scripts/test-pkcs11-chain.sh`
 
@@ -39,13 +40,14 @@ then tests extract → decrypt → base64-encode → unlock.
 using a loopback LUKS2 device and the real smartcard:
 
 ```bash
-sudo ./scripts/test-gpg-token-chain.sh [--recipient <gpg-id>]
+./scripts/test-gpg-token-chain.sh [--recipient <gpg-id>]
 ```
 
 Uses `gpg-cryptenroll` to generate a random key, enroll it into a LUKS2 keyslot,
 and store the GPG-encrypted blob as a `gpg-token` token in the LUKS2 header.
 Then exercises the same extract → `gpg --decrypt` → `cryptsetup luksOpen` path
-that the boot script uses.
+that the boot script uses.  Finally validates `gpg-cryptopen` (token:auto mode),
+including an idempotency check (second call exits cleanly with "already open").
 
 `--recipient` is optional; if omitted, `gpg-cryptenroll` auto-detects the key
 from the smartcard.
@@ -68,17 +70,35 @@ passphrase unlock.
 using a loopback LUKS2 device and the real smartcard:
 
 ```bash
-sudo ./scripts/test-gpg-file-chain.sh [--recipient <gpg-id>]
+./scripts/test-gpg-file-chain.sh [--recipient <gpg-id>]
 ```
 
 Uses `gpg-cryptenroll file:<path> <luks-device>` to generate a random key and write it
 as a GPG-encrypted file, enrolling it into a LUKS2 keyslot. Then exercises the
 same `gpg --decrypt` → `cryptsetup luksOpen` path that the boot script uses for
 the "GPG key file in crypttab field 3" workflow (as opposed to the LUKS2 token
-workflow tested by `test-gpg-token-chain.sh`).
+workflow tested by `test-gpg-token-chain.sh`).  Finally validates
+`gpg-cryptopen --key-spec file:<path>`, including an idempotency check (second
+call exits cleanly with "already open").
 
-Run as root (`sudo`) with the actual smartcard inserted.
+Run as your normal user (not root); these scripts use `sudo` internally for
+root-only operations.
 Cleanup (loopback device, temp files) is automatic on exit.
+
+## GPG mount chain test
+
+`scripts/test-gpg-mount-chain.sh` validates the post-boot open+mount workflow:
+
+```bash
+./scripts/test-gpg-mount-chain.sh [--recipient <gpg-id>]
+```
+
+The test creates a loopback LUKS2 device with an ext4 filesystem, enrolls a
+`gpg-token` token with `gpg-cryptenroll`, then runs `gpg-cryptmount` and checks:
+
+- mapper naming defaults to `luks-<uuid>`
+- mount succeeds at the requested mount point
+- a second `gpg-cryptmount` run is idempotent (already mounted)
 
 # manual tests
 

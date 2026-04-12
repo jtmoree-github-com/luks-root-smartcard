@@ -69,6 +69,14 @@ else
   die "gpg-cryptenroll not found (not in $SCRIPT_DIR nor in PATH)"
 fi
 
+if [ -x "$SCRIPT_DIR/gpg-cryptopen" ]; then
+  GPG_CRYPTOPEN="$SCRIPT_DIR/gpg-cryptopen"
+elif command -v gpg-cryptopen >/dev/null 2>&1; then
+  GPG_CRYPTOPEN="gpg-cryptopen"
+else
+  die "gpg-cryptopen not found (not in $SCRIPT_DIR nor in PATH)"
+fi
+
 WORK="$(mktemp -d /tmp/test-gpg-token.XXXXXX)"
 chmod 700 "$WORK"
 
@@ -183,7 +191,27 @@ sudo cryptsetup status "$MAPPER_NAME"
 sudo cryptsetup close "$MAPPER_NAME"
 ok "mapper closed"
 
+# ── Step 5: Validate gpg-cryptopen (token-based flow) ───────────────────────
+echo ""
+echo "=== Step 5: Validate gpg-cryptopen (token-based unlock) ==="
+
+echo ">>> gpg-cryptopen will prompt for your smartcard PIN <<<"
+sudo "$GPG_CRYPTOPEN" "$LOOP_DEV" --name "$MAPPER_NAME"
+sudo cryptsetup status "$MAPPER_NAME" | grep 'is active' >/dev/null \
+  || die "gpg-cryptopen: /dev/mapper/$MAPPER_NAME not active after open"
+ok "gpg-cryptopen opened /dev/mapper/$MAPPER_NAME"
+
+# Idempotency: second call must exit 0 and report already-open.
+sudo "$GPG_CRYPTOPEN" "$LOOP_DEV" --name "$MAPPER_NAME" 2>&1 \
+  | grep -q 'already open' \
+  || die "gpg-cryptopen: expected 'already open' on second call"
+ok "gpg-cryptopen is idempotent (already open)"
+
+sudo cryptsetup close "$MAPPER_NAME"
+ok "mapper closed"
+
 echo ""
 echo "=== ALL TESTS PASSED ==="
 echo "The full GPG token chain works:"
 echo "  gpg-cryptenroll → token stored → extract blob → gpg decrypt → LUKS unlock"
+echo "  gpg-cryptopen (token:auto) → luksOpen"
