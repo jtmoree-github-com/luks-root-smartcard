@@ -1,4 +1,4 @@
-luks-root-smartcard-tools (1.1.1~ppa4~ubuntu24.04.1) noble; urgency=medium
+luks-root-smartcard-tools (1.1.4) noble; urgency=medium
 
   * add bash completion
 

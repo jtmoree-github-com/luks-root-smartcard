@@ -2,18 +2,45 @@
 
 _gpg_cryptenroll() {
     local cur prev words cword
-    _init_completion || return
+    _init_completion -n : || return
+    if [[ -z "${cur:-}" && "${cword:-0}" -ge 0 ]]; then
+        cur="${words[$cword]}"
+    fi
 
     local opts="--recipient --size-bytes --force --keep-plaintext --keyslot --debug --help"
 
     case "$prev" in
         --recipient)
-            # Complete GPG key IDs / fingerprints / uids from the local keyring,
-            # plus the special 'auto' value.
+            # Complete stable identifiers from the local secret keyring,
+            # plus recipient-friendly UID/email values and the special 'auto'.
             local keys
-            keys="auto $(gpg --batch --with-colons --list-secret-keys 2>/dev/null \
-                | awk -F: '/^uid/ { print $10 }' | sed 's/ /_/g')"
-            COMPREPLY=( $(compgen -W "$keys" -- "$cur") )
+            keys="$(
+                {
+                    echo auto
+                    gpg --batch --with-colons --list-secret-keys --fingerprint 2>/dev/null \
+                        | awk -F: '
+                            /^sec:/ && $5 != "" { print $5 }
+                            /^fpr:/ && $10 != "" { print $10 }
+                            /^uid:/ && $10 != "" {
+                                uid=$10
+                                print uid
+                                if (match(uid, /<[^>]+>/)) {
+                                    email=substr(uid, RSTART + 1, RLENGTH - 2)
+                                    if (email != "") print email
+                                }
+                            }
+                        '
+                } | awk 'NF && !seen[$0]++'
+            )"
+
+            if [[ -z "$cur" ]]; then
+                mapfile -t COMPREPLY < <(printf '%s\n' "$keys")
+            else
+                mapfile -t COMPREPLY < <(
+                    printf '%s\n' "$keys" \
+                        | awk -v q="$cur" 'BEGIN { IGNORECASE=1 } index($0, q) == 1'
+                )
+            fi
             return
             ;;
         --size-bytes)
@@ -63,6 +90,10 @@ _gpg_cryptenroll() {
                 compopt -o nospace 2>/dev/null
             else
                 COMPREPLY=( $(compgen -W "token:auto token: file:" -- "$cur") )
+                # Convenience: allow bare "a<TAB>" to complete to token:auto.
+                if [[ ${#COMPREPLY[@]} -eq 0 && "auto" == "$cur"* ]]; then
+                    COMPREPLY=( "token:auto" )
+                fi
                 # Suppress space after prefixes that need further input.
                 [[ "$cur" == token:* || "$cur" == file:* ]] && \
                     compopt -o nospace 2>/dev/null
@@ -70,6 +101,16 @@ _gpg_cryptenroll() {
             ;;
         1)
             # Second positional: LUKS block device
+            if [[ "${words[1]:-}" == "token" ]]; then
+                # Compatibility fallback for environments that split on ':'.
+                if [[ -z "$cur" || "auto" == "$cur"* ]]; then
+                    COMPREPLY=( "token:auto" )
+                else
+                    COMPREPLY=()
+                fi
+                return
+            fi
+
             if [[ "$cur" == UUID=* ]]; then
                 local uuid_part="${cur#UUID=}"
                 local uuids

@@ -34,13 +34,28 @@ case "$BUMP_MODE" in
 		# Increment patch version in debian/changelog when explicitly requested.
 		CL="debian/changelog"
 		cur="$(head -1 "$CL" | sed -n 's/.*(\([^)]*\)).*/\1/p')"
-		major="${cur%%.*}"
-		rest="${cur#*.}"
-		minor="${rest%%.*}"
-		patch="${rest#*.}"
+		base="${cur%%~*}"
+
+		debrev=""
+		upstream="$base"
+		if [[ "$base" == *-* ]]; then
+			upstream="${base%-*}"
+			debrev="${base##*-}"
+		fi
+
+		IFS='.' read -r major minor patch extra <<<"$upstream"
+		if [[ -n "${extra:-}" ]] || ! [[ "${major:-}" =~ ^[0-9]+$ && "${minor:-}" =~ ^[0-9]+$ && "${patch:-}" =~ ^[0-9]+$ ]]; then
+			echo "Cannot auto-bump non-semver upstream version: $cur" >&2
+			exit 2
+		fi
+
 		patch=$(( patch + 1 ))
 		new="${major}.${minor}.${patch}"
-		sed -i "1s/($cur)/($new)/" "$CL"
+		if [ -n "$debrev" ]; then
+			new="${new}-${debrev}"
+		fi
+
+		sed -i "1s|($cur)|($new)|" "$CL"
 		echo "Version: $cur -> $new"
 		;;
 esac
