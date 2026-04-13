@@ -1,0 +1,112 @@
+# bash completion for gpg-cryptenroll
+
+_gpg_cryptenroll() {
+    local cur prev words cword
+    _init_completion || return
+
+    local opts="--recipient --size-bytes --force --keep-plaintext --keyslot --debug --help"
+
+    case "$prev" in
+        --recipient)
+            # Complete GPG key IDs / fingerprints / uids from the local keyring,
+            # plus the special 'auto' value.
+            local keys
+            keys="auto $(gpg --batch --with-colons --list-secret-keys 2>/dev/null \
+                | awk -F: '/^uid/ { print $10 }' | sed 's/ /_/g')"
+            COMPREPLY=( $(compgen -W "$keys" -- "$cur") )
+            return
+            ;;
+        --size-bytes)
+            # No useful completions; let the user type a number.
+            return
+            ;;
+        --keyslot)
+            COMPREPLY=( $(compgen -W "auto 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31" -- "$cur") )
+            return
+            ;;
+    esac
+
+    # First positional argument: key-spec
+    local positional_count=0
+    local i
+    for (( i=1; i < cword; i++ )); do
+        case "${words[$i]}" in
+            --recipient|--size-bytes|--keyslot)
+                (( i++ ))   # skip the value
+                ;;
+            --force|--keep-plaintext|--debug|--help)
+                ;;
+            -*)
+                ;;
+            *)
+                (( positional_count++ ))
+                ;;
+        esac
+    done
+
+    case "$positional_count" in
+        0)
+            # First positional: key-spec
+            if [[ "$cur" == file:* ]]; then
+                # Complete the path portion after "file:"
+                local path_part="${cur#file:}"
+                local IFS=$'\n'
+                local completions
+                completions=( $(compgen -f -- "$path_part") )
+                COMPREPLY=()
+                local c
+                for c in "${completions[@]}"; do
+                    COMPREPLY+=( "file:$c" )
+                done
+                [[ ${#COMPREPLY[@]} -eq 1 && -d "${COMPREPLY[0]#file:}" ]] && \
+                    COMPREPLY[0]="${COMPREPLY[0]}/"
+                compopt -o nospace 2>/dev/null
+            else
+                COMPREPLY=( $(compgen -W "token:auto token: file:" -- "$cur") )
+                # Suppress space after prefixes that need further input.
+                [[ "$cur" == token:* || "$cur" == file:* ]] && \
+                    compopt -o nospace 2>/dev/null
+            fi
+            ;;
+        1)
+            # Second positional: LUKS block device
+            if [[ "$cur" == UUID=* ]]; then
+                local uuid_part="${cur#UUID=}"
+                local uuids
+                uuids=( $(blkid -s UUID -o value 2>/dev/null) )
+                COMPREPLY=()
+                local u
+                for u in "${uuids[@]}"; do
+                    COMPREPLY+=( "UUID=$u" )
+                done
+                COMPREPLY=( $(compgen -W "${COMPREPLY[*]}" -- "$cur") )
+            elif [[ "$cur" == LABEL=* || "$cur" == PARTUUID=* || "$cur" == PARTLABEL=* ]]; then
+                # No easy dynamic completion; leave it to the user.
+                return
+            else
+                COMPREPLY=( $(compgen -W "UUID= LABEL= PARTUUID= PARTLABEL=" -- "$cur") )
+                compgen -f /dev/ -- "${cur:-/dev/}" | grep -E '^/dev/(sd|nvme|vd|hd|mapper)' \
+                    | while read -r d; do COMPREPLY+=( "$d" ); done
+                COMPREPLY+=( $(compgen -f -- "${cur:-/dev/}") )
+                # Deduplicate
+                local seen=()
+                local unique=()
+                local item
+                for item in "${COMPREPLY[@]}"; do
+                    if [[ ! " ${seen[*]} " =~ " $item " ]]; then
+                        seen+=( "$item" )
+                        unique+=( "$item" )
+                    fi
+                done
+                COMPREPLY=( "${unique[@]}" )
+                COMPREPLY=( $(compgen -W "${COMPREPLY[*]}" -- "$cur") )
+            fi
+            ;;
+        *)
+            # Options only after the two positional arguments.
+            COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
+            ;;
+    esac
+}
+
+complete -F _gpg_cryptenroll gpg-cryptenroll

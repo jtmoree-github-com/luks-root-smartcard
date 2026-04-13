@@ -12,6 +12,7 @@ Vcs-Browser: https://github.com/jtmoree-github-com/luks-root-smartcard
 Package: luks-root-smartcard-tools
 Architecture: all
 Depends: ${misc:Depends}, cryptsetup-initramfs, initramfs-tools, gnupg, opensc, pcscd, systemd-cryptsetup, libfido2-1
+Suggests: bash-completion
 Description: Smartcard root unlock for Debian/Ubuntu
  Provides initramfs hooks and boot scripts that unlock the root volume
  using a smartcard.  Supports FIDO2 (systemd-fido2), TPM2 (systemd-tpm2),
