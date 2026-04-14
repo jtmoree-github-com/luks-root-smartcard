@@ -19,12 +19,12 @@ UNSIGNED=0
 
 usage() {
   cat <<'EOF'
-Usage: build-ppa-source.sh --series <questing|noble|jammy|lts> [options]
+Usage: build-ppa-source.sh --series <resolute|questing|noble|jammy|lts> [options]
 
 Prepares debian/changelog for Launchpad PPA upload and optionally builds source artifacts.
 
 Required:
-  --series <name>          Ubuntu series name (questing, noble, jammy, or lts)
+  --series <name>          Ubuntu series name (resolute, questing, noble, jammy, or lts)
 
 Options:
   --ppa-rev <n>            PPA revision in version suffix (default: 1)
@@ -50,6 +50,7 @@ Default config file:
 
 Examples:
   ./scripts/build-ppa-source.sh --series noble --ppa-owner jtmoree --ppa-name security-tools
+  ./scripts/build-ppa-source.sh --series resolute --ppa-rev 1
   ./scripts/build-ppa-source.sh --series questing --ppa-rev 1
   ./scripts/build-ppa-source.sh --series lts --ppa-rev 2
   ./scripts/build-ppa-source.sh --series jammy --ppa-rev 2 --no-build
@@ -114,6 +115,9 @@ done
 
 [ -n "$SERIES" ] || { echo "--series is required" >&2; usage >&2; exit 2; }
 case "$SERIES" in
+  resolute)
+    DEFAULT_UBUNTU_SERIES_NUM="26.04"
+    ;;
   questing)
     DEFAULT_UBUNTU_SERIES_NUM="25.10"
     ;;
@@ -128,7 +132,7 @@ case "$SERIES" in
     DEFAULT_UBUNTU_SERIES_NUM="22.04"
     ;;
   *)
-    echo "Unsupported series: $SERIES (supported: questing, noble, jammy, lts)" >&2
+    echo "Unsupported series: $SERIES (supported: resolute, questing, noble, jammy, lts)" >&2
     exit 2
     ;;
 esac
