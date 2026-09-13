@@ -11,8 +11,8 @@ PPA_REV="1"
 PPA_OWNER="${LUKS_PPA_OWNER:-${LP_PPA_OWNER:-}}"
 PPA_NAME="${LUKS_PPA_NAME:-${LP_PPA_NAME:-}}"
 SIGN_KEY="${LUKS_DEBSIGN_KEYID:-${DEBSIGN_KEYID:-}}"
-LTS_SERIES="${LUKS_LTS_SERIES:-noble}"
-LTS_SERIES_NUM="${LUKS_LTS_SERIES_NUM:-24.04}"
+LTS_SERIES="${LUKS_LTS_SERIES:-resolute}"
+LTS_SERIES_NUM="${LUKS_LTS_SERIES_NUM:-26.04}"
 UBUNTU_SERIES_NUM=""
 NO_BUILD=0
 UNSIGNED=0
@@ -45,12 +45,12 @@ Default config file:
     LUKS_PPA_OWNER=jtmoree
     LUKS_PPA_NAME=<ppa-name>
     LUKS_DEBSIGN_KEYID=<keyid-or-fingerprint>
-    LUKS_LTS_SERIES=noble
-    LUKS_LTS_SERIES_NUM=24.04
+    LUKS_LTS_SERIES=resolute
+    LUKS_LTS_SERIES_NUM=26.04
 
 Examples:
-  ./scripts/build-ppa-source.sh --series noble --ppa-owner jtmoree --ppa-name security-tools
-  ./scripts/build-ppa-source.sh --series resolute --ppa-rev 1
+  ./scripts/build-ppa-source.sh --series resolute --ppa-owner jtmoree --ppa-name security-tools
+  ./scripts/build-ppa-source.sh --series noble --ppa-rev 1
   ./scripts/build-ppa-source.sh --series questing --ppa-rev 1
   ./scripts/build-ppa-source.sh --series lts --ppa-rev 2
   ./scripts/build-ppa-source.sh --series jammy --ppa-rev 2 --no-build
@@ -63,8 +63,8 @@ if [ -r "$CONFIG_FILE" ]; then
   PPA_OWNER="${PPA_OWNER:-${LUKS_PPA_OWNER:-${LP_PPA_OWNER:-}}}"
   PPA_NAME="${PPA_NAME:-${LUKS_PPA_NAME:-${LP_PPA_NAME:-}}}"
   SIGN_KEY="${SIGN_KEY:-${LUKS_DEBSIGN_KEYID:-${DEBSIGN_KEYID:-}}}"
-  LTS_SERIES="${LTS_SERIES:-${LUKS_LTS_SERIES:-noble}}"
-  LTS_SERIES_NUM="${LTS_SERIES_NUM:-${LUKS_LTS_SERIES_NUM:-24.04}}"
+  LTS_SERIES="${LTS_SERIES:-${LUKS_LTS_SERIES:-resolute}}"
+  LTS_SERIES_NUM="${LTS_SERIES_NUM:-${LUKS_LTS_SERIES_NUM:-26.04}}"
 fi
 
 while [ "$#" -gt 0 ]; do
