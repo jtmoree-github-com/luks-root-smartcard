@@ -29,33 +29,9 @@ dbg() {
   echo "smartcard-root-gpg: DEBUG: $*" >&2
 }
 
-# Early exit if crypttab field 3 is not 'none'.
-# We only handle the GPG token workflow when field 3 is 'none'; the token
-# is then discovered automatically by scanning the LUKS2 header.
-# Exiting here avoids starting pcscd or touching any hardware, leaving
-# stock keyscript= handling (e.g. decrypt_gnupg-sc) completely undisturbed.
-_early_keyspec=""
-if [ -r /cryptroot/crypttab ]; then
-  _early_mapper=""
-  for _tok in $(cat /proc/cmdline 2>/dev/null); do
-    case "$_tok" in root=/dev/mapper/*) _early_mapper="${_tok#root=/dev/mapper/}" ;; esac
-  done
-  while IFS= read -r _early_line; do
-    case "$_early_line" in ''|'#'*) continue ;; esac
-    set -- $_early_line
-    [ "$#" -ge 3 ] || continue
-    if [ -z "$_early_mapper" ] || [ "$1" = "$_early_mapper" ]; then
-      _early_keyspec="$3"; break
-    fi
-  done </cryptroot/crypttab
-fi
-case "${_early_keyspec:-none}" in
-  none) ;;
-  *)
-    dbg "key spec ${_early_keyspec} is not 'none'; exiting GPG token path"
-    exit 0
-    ;;
-esac
+# This script is token-driven: it scans the root LUKS2 header for gpg-token
+# tokens and only activates smartcard handling when such a token is present.
+# If no gpg-token token exists, it exits without prompting.
 
 # Set GNUPGHOME so all gpg calls (card-status, decrypt, etc.) use it.
 # gpg --card-status auto-creates secret-key stubs when a matching pubkey exists.
@@ -127,7 +103,7 @@ extract_token_blob() {
       _json="$(cryptsetup token export --token-id "$_i" "$_dev" 2>/dev/null || true)"
       if [ -n "$_json" ]; then
         _t="$(json_value "$_json" "type" || true)"
-        if [ "$_t" = "root-gpg" ]; then
+        if [ "$_t" = "gpg-token" ]; then
           _b64="$(json_value "$_json" "gpg-key" || true)"
           [ -n "$_b64" ] && break
         fi
@@ -138,7 +114,7 @@ extract_token_blob() {
     _json="$(cryptsetup token export --token-id "$_token_id" "$_dev" 2>/dev/null || true)"
     if [ -n "$_json" ]; then
       _t="$(json_value "$_json" "type" || true)"
-      if [ "$_t" = "root-gpg" ]; then
+      if [ "$_t" = "gpg-token" ]; then
         _b64="$(json_value "$_json" "gpg-key" || true)"
       fi
     fi
@@ -173,6 +149,11 @@ decrypt_gpg() {
 }
 
 check_smartcard() {
+  if command -v gpgconf >/dev/null 2>&1; then
+    gpgconf --kill scdaemon 2>/dev/null || true
+    gpgconf --kill gpg-agent 2>/dev/null || true
+  fi
+
   if command -v gpg >/dev/null 2>&1; then
     _card_status_log="$(mktemp /run/gpg-card-status.XXXXXX)"
     if gpg --no-options --trust-model=always --batch --no-tty --card-status >"$_card_status_log" 2>&1; then
@@ -208,7 +189,25 @@ prompt_skip_or_wait() {
       ;;
     *)
       msg "Please insert SmartCard..."
-      until check_smartcard; do sleep 2; done
+      _wait_try=0
+      while true; do
+        _wait_try=$(( _wait_try + 1 ))
+        dbg "wait loop attempt ${_wait_try}: probing for SmartCard (scdaemon built-in CCID)"
+        # Stop pcscd so scdaemon uses its built-in CCID driver directly.
+        # This is the same path as the initial detection attempt 1, which
+        # succeeds when the card is present. pcscd in initramfs cannot detect
+        # hot-plugged cards reliably; scdaemon's CCID driver can.
+        if pidof pcscd >/dev/null 2>&1; then
+          for _pcscd_pid in $(pidof pcscd 2>/dev/null); do
+            kill "$_pcscd_pid" 2>/dev/null || true
+          done
+        fi
+        rm -f /run/pcscd.pid /run/pcscd/pcscd.comm
+        if check_smartcard; then
+          break
+        fi
+        sleep 5
+      done
       return 1
       ;;
   esac
@@ -222,8 +221,8 @@ auto_detect_gpg_token() {
     if [ -n "$_json" ]; then
       _t="$(json_value "$_json" "type" || true)"
       dbg "token $_i type=${_t:-unknown}"
-      if [ "$_t" = "root-gpg" ]; then
-        echo "root-gpg:$_i"
+      if [ "$_t" = "gpg-token" ]; then
+        echo "gpg-token:$_i"
         return 0
       fi
     fi
@@ -245,34 +244,19 @@ if cryptsetup status "$CRYPTROOT_NAME" >/dev/null 2>&1; then
   exit 0
 fi
 
-[ -n "$KEY_SPEC" ] || KEY_SPEC="none"
-
 DEV="$(resolve_device "$CRYPTROOT_SOURCE")" || panic "smartcard-root-gpg: cannot resolve device $CRYPTROOT_SOURCE"
 [ -b "$DEV" ] || panic "smartcard-root-gpg: $DEV is not a block device"
 dbg "resolved backing device: $DEV"
 
-# Only handle GPG workflow selections in this script.
-if [ "$KEY_SPEC" = "none" ]; then
-  dbg "crypttab field 3 is none; scanning tokens for root-gpg"
-  KEY_SPEC="$(auto_detect_gpg_token "$DEV" || true)"
-  if [ -z "$KEY_SPEC" ]; then
-    dbg "no GPG token found; leaving GPG path"
-    exit 0
-  fi
-  msg "auto-detected token selector: $KEY_SPEC"
-elif [ "${KEY_SPEC#root-gpg:}" != "$KEY_SPEC" ]; then
-  # Internal auto-detected selector from auto_detect_gpg_token above.
-  dbg "using auto-detected token selector: $KEY_SPEC"
-  :
-elif [ "${KEY_SPEC#systemd-pkcs11:}" != "$KEY_SPEC" ]; then
-  dbg "key spec belongs to PKCS#11 path; exiting GPG path"
-  exit 0
-else
-  # File-based GPG keys are handled by stock cryptroot with
-  # keyscript=decrypt_gnupg-sc — not by this script.
-  dbg "key spec $KEY_SPEC not handled by GPG token path; exiting"
+# Always detect from the LUKS2 header so custom handling runs whenever a
+# gpg-token token exists on the root device.
+KEY_SPEC="$(auto_detect_gpg_token "$DEV" || true)"
+if [ -z "$KEY_SPEC" ]; then
+  dbg "no gpg-token token found on root device; exiting GPG token path"
   exit 0
 fi
+msg "auto-detected token selector: $KEY_SPEC"
+SMARTCARD_EXPECT="1"
 
 if [ -n "${GNUPGHOME:-}" ]; then
   dbg "GNUPGHOME=$GNUPGHOME"
@@ -315,63 +299,88 @@ start_pcscd() {
 }
 
 CARD_FOUND=false
-for _try in 1 2 3; do
-  dbg "card detection attempt $_try/3"
+if [ "$SMARTCARD_EXPECT" = "1" ]; then
+  dbg "smartcard expectation enabled (interactive mode)"
   if check_smartcard; then
     CARD_FOUND=true
-    break
+  else
+    if ! pidof pcscd >/dev/null 2>&1; then
+      msg "smartcard not detected via internal CCID; starting pcscd and retrying..."
+      start_pcscd || true
+      gpgconf --kill scdaemon 2>/dev/null || true
+      if check_smartcard; then
+        CARD_FOUND=true
+      fi
+    fi
+    if [ "$CARD_FOUND" = false ]; then
+      if prompt_skip_or_wait; then
+        msg "skipping GPG smartcard flow; continuing to standard cryptroot fallback"
+        exit 0
+      fi
+      CARD_FOUND=true
+    fi
   fi
-  # After first failure try pcscd before sleeping.
-  if [ "$_try" = "1" ] && ! pidof pcscd >/dev/null 2>&1; then
-    msg "smartcard not detected via internal CCID; starting pcscd and retrying..."
-    start_pcscd || true
-    gpgconf --kill scdaemon 2>/dev/null || true
-    continue
+else
+  dbg "smartcard expectation disabled (non-interactive mode)"
+  if check_smartcard; then
+    CARD_FOUND=true
+  else
+    if ! pidof pcscd >/dev/null 2>&1; then
+      start_pcscd || true
+      gpgconf --kill scdaemon 2>/dev/null || true
+      if check_smartcard; then
+        CARD_FOUND=true
+      fi
+    fi
   fi
-  msg "smartcard not detected (attempt $_try/3), waiting for hardware..."
-  # Kill scdaemon between retries so it re-probes USB on next card-status
-  gpgconf --kill scdaemon 2>/dev/null || true
-  sleep 3
-done
 
-if [ "$CARD_FOUND" = false ]; then
-  if prompt_skip_or_wait; then
-    msg "skipping GPG smartcard flow; continuing to standard cryptroot fallback"
+  if [ "$CARD_FOUND" = false ]; then
+    msg "smartcard not detected and expectation trigger is disabled; continuing to standard cryptroot fallback"
     exit 0
   fi
 fi
 
 TMP_KEY="$(mktemp /run/smartcard-key.XXXXXX)"
 chmod 600 "$TMP_KEY"
-unlock_ok=false
+while true; do
+  unlock_ok=false
 
-BLOB="$(extract_token_blob "$DEV" "$KEY_SPEC" || true)"
-if [ -z "$BLOB" ]; then
-  dbg "failed to extract gpg-key blob from token selector $KEY_SPEC"
-elif decrypt_gpg "$BLOB" "$TMP_KEY"; then
-  dbg "gpg token decrypt succeeded"
-  if cryptsetup luksOpen "$DEV" "$CRYPTROOT_NAME" --key-file "$TMP_KEY"; then
-    unlock_ok=true
-    dbg "cryptsetup luksOpen succeeded via GPG token"
+  BLOB="$(extract_token_blob "$DEV" "$KEY_SPEC" || true)"
+  if [ -z "$BLOB" ]; then
+    dbg "failed to extract gpg-key blob from token selector $KEY_SPEC"
+  elif decrypt_gpg "$BLOB" "$TMP_KEY"; then
+    dbg "gpg token decrypt succeeded"
+    if cryptsetup luksOpen "$DEV" "$CRYPTROOT_NAME" --key-file "$TMP_KEY"; then
+      unlock_ok=true
+      dbg "cryptsetup luksOpen succeeded via GPG token"
+    else
+      dbg "cryptsetup luksOpen failed after successful GPG token decrypt"
+    fi
   else
-    dbg "cryptsetup luksOpen failed after successful GPG token decrypt"
+    dbg "gpg token decrypt failed for selector $KEY_SPEC"
   fi
-else
-  dbg "gpg token decrypt failed for selector $KEY_SPEC"
-fi
-rm -f "${BLOB:-}"
+  rm -f "${BLOB:-}"
 
-rm -f "$TMP_KEY"
+  if [ "$unlock_ok" = true ]; then
+    rm -f "$TMP_KEY"
+    exit 0
+  fi
 
-if [ "$unlock_ok" = true ]; then
+  msg "GPG decrypt failed"
+  if [ "$SMARTCARD_EXPECT" = "1" ]; then
+    if prompt_skip_or_wait; then
+      rm -f "$TMP_KEY"
+      msg "bypassing GPG smartcard; continuing to standard cryptroot fallback"
+      exit 0
+    fi
+    msg "smartcard detected; retrying GPG unlock"
+    if command -v gpgconf >/dev/null 2>&1; then
+      gpgconf --kill scdaemon 2>/dev/null || true
+    fi
+    continue
+  fi
+
+  rm -f "$TMP_KEY"
+  msg "GPG flow failed in non-interactive mode; continuing to standard cryptroot fallback"
   exit 0
-fi
-
-msg "GPG decrypt failed"
-if prompt_skip_or_wait; then
-  msg "bypassing GPG smartcard; continuing to standard cryptroot fallback"
-  exit 0
-fi
-# user chose to retry — loop not implemented, fall through
-msg "GPG flow did not unlock root; continuing to standard cryptroot fallback"
-exit 0
+done

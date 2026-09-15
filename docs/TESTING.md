@@ -6,8 +6,22 @@ Automated test scripts:
 
 - `scripts/test-gpg-file-chain.sh`
 - `scripts/test-gpg-token-chain.sh`
+- `scripts/test-gpg-mount-chain.sh`
+- `scripts/test-fido2-chain.sh`
 - `scripts/test-pkcs11-chain.sh`
 - `scripts/test-tpm2-chain.sh`
+
+## FIDO2 chain test
+
+`scripts/test-fido2-chain.sh` runs the full FIDO2 chain end-to-end
+using a loopback LUKS2 device and a real FIDO2 authenticator:
+
+```bash
+sudo ./scripts/test-fido2-chain.sh
+```
+
+Creates a temporary LUKS volume, enrolls FIDO2 via `systemd-cryptenroll`,
+then validates `cryptsetup luksOpen --token-only --token-type systemd-fido2`.
 
 ## PKCS#11 chain test
 
@@ -27,16 +41,27 @@ then tests extract → decrypt → base64-encode → unlock.
 using a loopback LUKS2 device and the real smartcard:
 
 ```bash
-sudo ./scripts/test-gpg-token-chain.sh [--recipient <gpg-id>]
+./scripts/test-gpg-token-chain.sh [--recipient <gpg-id>]
 ```
 
 Uses `gpg-cryptenroll` to generate a random key, enroll it into a LUKS2 keyslot,
-and store the GPG-encrypted blob as a `root-gpg` token in the LUKS2 header.
+and store the GPG-encrypted blob as a `gpg-token` token in the LUKS2 header.
 Then exercises the same extract → `gpg --decrypt` → `cryptsetup luksOpen` path
-that the boot script uses.
+that the boot script uses.  Finally validates `gpg-cryptopen` (token:auto mode),
+including an idempotency check (second call exits cleanly with "already open").
 
 `--recipient` is optional; if omitted, `gpg-cryptenroll` auto-detects the key
 from the smartcard.
+
+Boot-time expectation behavior for token unlock is token-driven:
+
+- `gpg-token` token present in the root LUKS2 header: GPG smartcard flow runs.
+- `systemd-pkcs11` token present in the root LUKS2 header: PKCS#11 flow runs.
+- no matching token present: workflow exits quietly (no smartcard prompt).
+
+If a matching token is present but smartcard hardware is missing, initramfs
+prompts the user to either wait/insert card or bypass and fall back to
+passphrase unlock.
 
 ## GPG file chain test
 
@@ -46,16 +71,19 @@ from the smartcard.
 using a loopback LUKS2 device and the real smartcard:
 
 ```bash
-sudo ./scripts/test-gpg-file-chain.sh [--recipient <gpg-id>]
+./scripts/test-gpg-file-chain.sh [--recipient <gpg-id>]
 ```
 
 Uses `gpg-cryptenroll file:<path> <luks-device>` to generate a random key and write it
 as a GPG-encrypted file, enrolling it into a LUKS2 keyslot. Then exercises the
 same `gpg --decrypt` → `cryptsetup luksOpen` path that the boot script uses for
 the "GPG key file in crypttab field 3" workflow (as opposed to the LUKS2 token
-workflow tested by `test-gpg-token-chain.sh`).
+workflow tested by `test-gpg-token-chain.sh`).  Finally validates
+`gpg-cryptopen --key-spec file:<path>`, including an idempotency check (second
+call exits cleanly with "already open").
 
-Run as root (`sudo`) with the actual smartcard inserted.
+Run as your normal user (not root); these scripts use `sudo` internally for
+root-only operations.
 Cleanup (loopback device, temp files) is automatic on exit.
 
 ## TPM2 chain test
@@ -81,6 +109,21 @@ The test:
 Requires a working TPM2 device (`/dev/tpmrm0` or `/dev/tpm0`) and
 `tpm2-tools` installed.
 
+## GPG mount chain test
+
+`scripts/test-gpg-mount-chain.sh` validates the post-boot open+mount workflow:
+
+```bash
+./scripts/test-gpg-mount-chain.sh [--recipient <gpg-id>]
+```
+
+The test creates a loopback LUKS2 device with an ext4 filesystem, enrolls a
+`gpg-token` token with `gpg-cryptenroll`, then runs `gpg-cryptmount` and checks:
+
+- mapper naming defaults to `luks-<uuid>`
+- mount succeeds at the requested mount point
+- a second `gpg-cryptmount` run is idempotent (already mounted)
+
 # manual tests
 
 Run these tests after development to validate full boot behavior. Reboots are
@@ -97,8 +140,9 @@ each scenario.
 
 ## luks-root-smartcard
 
-These tests require updates to crypttab. Specifically, remove keyscript and use
-`none` for field 3.
+For token workflow tests, remove keyscript and use `none` for field 3.
+(`none` is recommended for token mode; token detection itself comes from the
+LUKS2 header.)
 
 1. gpg-cryptenroll file workflow decrypts with smartcard.
 1. gpg-cryptenroll file workflow falls back to passphrase.

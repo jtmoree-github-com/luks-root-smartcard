@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+
+for f in \
+	/usr/sbin/gpg-cryptenroll \
+	/usr/sbin/gpg-cryptopen \
+	/usr/sbin/gpg-cryptmount
+do
+	sh -n "$f"
+done
+
+echo "helper script syntax checks passed"

@@ -186,10 +186,10 @@ auto_detect_tpm2_token() {
   while [ "$_i" -lt 32 ]; do
     _json="$(cryptsetup token export --token-id "$_i" "$_dev" 2>/dev/null || true)"
     if [ -n "$_json" ]; then
-      _t="$(json_value "$_json" "type" || true)"
-      dbg "token $_i type=${_t:-unknown}"
-      if [ "$_t" = "systemd-tpm2" ]; then
-        echo "systemd-tpm2:$_i"
+      _type="$(printf '%s' "$_json" | tr -d '\n' | sed -n 's/.*"type":"\([^"]*\)".*/\1/p')"
+      dbg "token $_i type=${_type:-unknown}"
+      if [ "$_type" = "systemd-tpm2" ]; then
+        echo "$_i"
         return 0
       fi
     fi

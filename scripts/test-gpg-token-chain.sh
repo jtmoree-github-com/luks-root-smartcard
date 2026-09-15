@@ -3,7 +3,7 @@
 # using a virtual (loopback) LUKS2 device + the real smartcard.
 #
 # Uses gpg-cryptenroll to generate a key, enroll into a LUKS keyslot,
-# and store the encrypted blob as a LUKS2 root-gpg token.
+# and store the encrypted blob as a LUKS2 gpg-token token.
 # Then exercises the same extract→decrypt→unlock path the boot script uses.
 #
 # Run as your normal user — sudo is used internally where root is needed.
@@ -69,6 +69,14 @@ else
   die "gpg-cryptenroll not found (not in $SCRIPT_DIR nor in PATH)"
 fi
 
+if [ -x "$SCRIPT_DIR/gpg-cryptopen" ]; then
+  GPG_CRYPTOPEN="$SCRIPT_DIR/gpg-cryptopen"
+elif command -v gpg-cryptopen >/dev/null 2>&1; then
+  GPG_CRYPTOPEN="gpg-cryptopen"
+else
+  die "gpg-cryptopen not found (not in $SCRIPT_DIR nor in PATH)"
+fi
+
 WORK="$(mktemp -d /tmp/test-gpg-token.XXXXXX)"
 chmod 700 "$WORK"
 
@@ -98,7 +106,7 @@ ok "gpg-cryptenroll completed"
 
 # ── Step 3: Verify token is present ─────────────────────────────────────────
 echo ""
-echo "=== Step 3: Verify LUKS2 root-gpg token ==="
+echo "=== Step 3: Verify LUKS2 gpg-token token ==="
 
 # Find the token (scan slots 0-31, same as boot script)
 TOKEN_ID=""
@@ -108,7 +116,7 @@ while [ "$_i" -lt 32 ]; do
   _json="$(sudo cryptsetup token export --token-id "$_i" "$LOOP_DEV" 2>/dev/null || true)"
   if [ -n "$_json" ]; then
     _t="$(json_value "$_json" "type" || true)"
-    if [ "$_t" = "root-gpg" ] || [ "$_t" = "luks2-gpg" ]; then
+    if [ "$_t" = "gpg-token" ]; then
       TOKEN_ID="$_i"
       TOKEN_JSON="$_json"
       break
@@ -117,11 +125,15 @@ while [ "$_i" -lt 32 ]; do
   _i=$(( _i + 1 ))
 done
 
-[ -n "$TOKEN_ID" ] || die "no root-gpg token found in LUKS2 header"
+[ -n "$TOKEN_ID" ] || die "no gpg-token token found in LUKS2 header"
 ok "found token id $TOKEN_ID"
 
 TOKEN_TYPE="$(json_value "$TOKEN_JSON" "type")"
 ok "token type: $TOKEN_TYPE"
+
+TOKEN_KEYSLOT="$(printf '%s' "$TOKEN_JSON" | tr -d '\n' | sed -n 's/.*"keyslots"[[:space:]]*:[[:space:]]*\[[[:space:]]*"\{0,1\}\([0-9][0-9]*\)"\{0,1\}[[:space:]]*\].*/\1/p')"
+[ -n "$TOKEN_KEYSLOT" ] || die "keyslots field does not include an enrolled slot in gpg-token token JSON"
+ok "token metadata keyslots[0]: $TOKEN_KEYSLOT"
 
 echo ""
 echo "--- LUKS2 token dump (first 200 chars) ---"
@@ -179,7 +191,27 @@ sudo cryptsetup status "$MAPPER_NAME"
 sudo cryptsetup close "$MAPPER_NAME"
 ok "mapper closed"
 
+# ── Step 5: Validate gpg-cryptopen (token-based flow) ───────────────────────
+echo ""
+echo "=== Step 5: Validate gpg-cryptopen (token-based unlock) ==="
+
+echo ">>> gpg-cryptopen will prompt for your smartcard PIN <<<"
+sudo "$GPG_CRYPTOPEN" "$LOOP_DEV" --name "$MAPPER_NAME"
+sudo cryptsetup status "$MAPPER_NAME" | grep 'is active' >/dev/null \
+  || die "gpg-cryptopen: /dev/mapper/$MAPPER_NAME not active after open"
+ok "gpg-cryptopen opened /dev/mapper/$MAPPER_NAME"
+
+# Idempotency: second call must exit 0 and report already-open.
+sudo "$GPG_CRYPTOPEN" "$LOOP_DEV" --name "$MAPPER_NAME" 2>&1 \
+  | grep -q 'already open' \
+  || die "gpg-cryptopen: expected 'already open' on second call"
+ok "gpg-cryptopen is idempotent (already open)"
+
+sudo cryptsetup close "$MAPPER_NAME"
+ok "mapper closed"
+
 echo ""
 echo "=== ALL TESTS PASSED ==="
 echo "The full GPG token chain works:"
 echo "  gpg-cryptenroll → token stored → extract blob → gpg decrypt → LUKS unlock"
+echo "  gpg-cryptopen (token:auto) → luksOpen"

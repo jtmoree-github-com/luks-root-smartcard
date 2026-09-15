@@ -48,6 +48,8 @@ TOKEN_ID="auto"
 OUTPUT_PATH=""
 DELETE_OUTPUT=0
 DEBUG=0
+ENROLLED_KEYSLOT=""
+IS_ROOT_LUKS_DEVICE=0
 
 dbg() { [ "$DEBUG" -eq 1 ] && echo "[debug] $*" >&2 || true; }
 
@@ -211,6 +213,31 @@ resolve_crypttab_name_for_device() {
   return 1
 }
 
+is_root_luks_device() {
+  _target_dev="$1"
+  _target_real="$(readlink -f "$_target_dev" 2>/dev/null || echo "$_target_dev")"
+
+  _root_src="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
+  [ -n "$_root_src" ] || return 1
+
+  case "$_root_src" in
+    /dev/mapper/*)
+      _root_name="${_root_src#/dev/mapper/}"
+      _root_backing="$(cryptsetup status "$_root_name" 2>/dev/null | awk '/^[[:space:]]*device:[[:space:]]+/ { print $2; exit }')"
+      [ -n "$_root_backing" ] || return 1
+      _root_real="$(readlink -f "$_root_backing" 2>/dev/null || echo "$_root_backing")"
+      ;;
+    /dev/*)
+      _root_real="$(readlink -f "$_root_src" 2>/dev/null || echo "$_root_src")"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+
+  [ "$_target_real" = "$_root_real" ]
+}
+
 print_crypttab_guidance() {
   _desired_key="$1"
   _desired_opts="$2"
@@ -276,6 +303,27 @@ resolve_auto_recipient() {
   exit 1
 }
 
+list_enabled_keyslots() {
+  _dev="$1"
+  cryptsetup luksDump "$_dev" 2>/dev/null \
+    | awk '
+        /^Key Slot [0-9]+: ENABLED$/ {
+          s=$0
+          sub(/^Key Slot /, "", s)
+          sub(/: ENABLED$/, "", s)
+          print s
+          next
+        }
+        /^[[:space:]]*[0-9]+:[[:space:]]+luks/ {
+          s=$1
+          sub(/:$/, "", s)
+          print s
+          next
+        }
+      ' \
+    | awk 'NF && !seen[$0]++ { print }'
+}
+
 import_luks2_gpg_token() {
   _dev="$1"
   _slot="$2"
@@ -283,6 +331,7 @@ import_luks2_gpg_token() {
   _recipient="$4"
   _blob_path="$5"
   _force="$6"
+  _meta_keyslot="$7"
 
   cryptsetup isLuks "$_dev" 2>/dev/null || die "$_dev is not a LUKS device"
 
@@ -299,10 +348,14 @@ import_luks2_gpg_token() {
   _blob_b64="$(base64 <"$_blob_path" | tr -d '\n')"
   [ -n "$_blob_b64" ] || die "failed to encode encrypted key for token storage"
 
-  _json_tmp="$(mktemp /dev/shm/root-gpg-token.XXXXXX.json)"
+  _json_tmp="$(mktemp /dev/shm/gpg-token.XXXXXX.json)"
   chmod 600 "$_json_tmp"
+  _keyslots_json="[]"
+  case "$_meta_keyslot" in
+    [0-9]|[1-2][0-9]|3[0-1]) _keyslots_json='["'"$_meta_keyslot"'"]' ;;
+  esac
   cat >"$_json_tmp" <<EOF
-{"type":"root-gpg","keyslots":[],"gpg-recipient":"$_recipient","gpg-key":"$_blob_b64"}
+{"type":"gpg-token","keyslots":$_keyslots_json,"gpg-recipient":"$_recipient","gpg-key":"$_blob_b64"}
 EOF
 
   _token_args=""
@@ -316,7 +369,7 @@ EOF
   # shellcheck disable=SC2086
   if ! cryptsetup token import $_token_args --json-file "$_json_tmp" "$_dev"; then
     rm -f "$_json_tmp"
-    die "failed to import root-gpg token"
+    die "failed to import gpg-token token"
   fi
 
   rm -f "$_json_tmp"
@@ -335,6 +388,13 @@ shift 2
 # Fail fast: verify that the target resolves to an existing block device
 # before processing any additional options or doing any key operations.
 LUKS_DEVICE="$(resolve_device_spec "$LUKS_DEVICE_SPEC")"
+
+if is_root_luks_device "$LUKS_DEVICE"; then
+  IS_ROOT_LUKS_DEVICE=1
+  dbg "detected root LUKS target: $LUKS_DEVICE"
+else
+  dbg "detected non-root LUKS target: $LUKS_DEVICE"
+fi
 
 # Modifying LUKS keyslots/tokens requires root privileges.
 [ "$(id -u)" -eq 0 ] || die "root privileges are required to enroll keys/tokens on $LUKS_DEVICE"
@@ -508,7 +568,17 @@ if [ -n "$KEYSLOT" ]; then
 
   if [ "$KEYSLOT" = "auto" ]; then
     echo "Enrolling key into next available slot on $LUKS_DEVICE ..."
+    _slots_before_file="$(mktemp /dev/shm/luks-slots-before.XXXXXX)"
+    _slots_after_file="$(mktemp /dev/shm/luks-slots-after.XXXXXX)"
+    list_enabled_keyslots "$LUKS_DEVICE" >"$_slots_before_file" || true
     cryptsetup luksAddKey "$LUKS_DEVICE" "$PLAIN_KEY"
+    list_enabled_keyslots "$LUKS_DEVICE" >"$_slots_after_file" || true
+    ENROLLED_KEYSLOT="$(awk 'NR==FNR { have[$1]=1; next } !have[$1] { print; exit }' "$_slots_before_file" "$_slots_after_file")"
+    if [ -z "$ENROLLED_KEYSLOT" ]; then
+      ENROLLED_KEYSLOT="$(tail -n 1 "$_slots_after_file" 2>/dev/null || true)"
+    fi
+    rm -f "$_slots_before_file" "$_slots_after_file"
+    [ -n "$ENROLLED_KEYSLOT" ] && echo "Detected enrolled slot: $ENROLLED_KEYSLOT"
     echo "Key successfully enrolled."
   else
     # Check whether the requested slot is already occupied.
@@ -531,18 +601,22 @@ if [ -n "$KEYSLOT" ]; then
         "$LUKS_DEVICE" "$PLAIN_KEY"
       rm -f "$_PASS_TMP"
       trap - EXIT INT TERM
+      ENROLLED_KEYSLOT="$KEYSLOT"
       echo "Slot $KEYSLOT replaced successfully."
     else
       echo "Enrolling key into slot $KEYSLOT on $LUKS_DEVICE ..."
       cryptsetup luksAddKey --new-key-slot "$KEYSLOT" "$LUKS_DEVICE" "$PLAIN_KEY"
+      ENROLLED_KEYSLOT="$KEYSLOT"
       echo "Key successfully enrolled in slot $KEYSLOT."
     fi
   fi
 fi
 
 if [ "$TOKEN_MODE" -eq 1 ]; then
-  import_luks2_gpg_token "$LUKS_DEVICE" "$KEYSLOT" "$TOKEN_ID" "$RECIPIENT" "$OUTPUT_PATH" "$FORCE"
-  echo "Imported LUKS2 token type 'root-gpg' on $LUKS_DEVICE"
+  [ -n "$ENROLLED_KEYSLOT" ] || ENROLLED_KEYSLOT="$KEYSLOT"
+  import_luks2_gpg_token "$LUKS_DEVICE" "$KEYSLOT" "$TOKEN_ID" "$RECIPIENT" "$OUTPUT_PATH" "$FORCE" "$ENROLLED_KEYSLOT"
+  echo "Imported LUKS2 token type 'gpg-token' on $LUKS_DEVICE"
+  echo "Token metadata: keyslots=[$ENROLLED_KEYSLOT] when resolvable (informational only)"
   echo "Use crypttab field 3 value: none"
   print_crypttab_guidance "none" "luks" "LUKS2 token"
 else
@@ -567,7 +641,7 @@ else
   echo "Temporary plaintext key removed from tmpfs."
 fi
 
-if [ "$DELETE_OUTPUT" -eq 0 ] && [ "$TOKEN_MODE" -eq 0 ]; then
+if [ "$IS_ROOT_LUKS_DEVICE" -eq 1 ] && [ "$DELETE_OUTPUT" -eq 0 ] && [ "$TOKEN_MODE" -eq 0 ]; then
   WARN_TARGET="$(resolve_crypttab_name_for_device "$LUKS_DEVICE" || true)"
   [ -n "$WARN_TARGET" ] || WARN_TARGET="$(basename "$LUKS_DEVICE")"
 cat >&2 <<NOTE
@@ -583,9 +657,11 @@ normally via the smartcard at boot.
 NOTE
 fi
 
+if [ "$IS_ROOT_LUKS_DEVICE" -eq 1 ]; then
 cat >&2 <<'NOTE'
 
 Example: rebuild initramfs for the running kernel:
 
   update-initramfs -u -k "$(uname -r)"
 NOTE
+fi
