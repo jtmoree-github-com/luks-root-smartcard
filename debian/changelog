@@ -1,3 +1,9 @@
+luks-root-smartcard-tools (1.1.5) resolute; urgency=medium
+
+  * update LTS
+
+ -- JT Moree <jtmoree@gmail.com>  Sat, 13 Sep 2026 00:00:00 +0000
+
 luks-root-smartcard-tools (1.1.4) noble; urgency=medium
 
   * add bash completion

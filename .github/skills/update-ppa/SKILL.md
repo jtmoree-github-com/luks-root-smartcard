@@ -18,9 +18,9 @@ Builds a signed Launchpad PPA source package and prints the `dput` upload comman
 
 | Series | Version |
 |---|---|
-| `resolute` | 26.04 |
+| `resolute` / `lts` | 26.04 |
 | `questing` | 25.10 |
-| `noble` / `lts` | 24.04 |
+| `noble` | 24.04 |
 | `jammy` | 22.04 |
 
 ## Procedure

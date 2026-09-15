@@ -158,8 +158,9 @@ sudo update-initramfs -u -k "$(uname -r)"
 ## Quick start (TPM2)
 
 ```bash
+dev=/dev/mapper/nvmen1p7
 # Enroll TPM2-based unlock against PCR 7
-sudo systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs=7 /dev/<luks-device>
+sudo systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs=7 $dev
 
 # Recommended: set crypttab field 3 to none for token mode
 # (edit /etc/crypttab so the line reads: <name> UUID=<uuid> none luks)
@@ -253,17 +254,17 @@ For the current development series (questing), switch the series:
 ./scripts/build-ppa-source.sh --series questing --ppa-rev 1 --ppa-owner jtmoree --ppa-name security-tools
 ```
 
-For the last LTS, use `lts` (currently maps to noble):
+For the current LTS, use `lts` (currently maps to resolute):
 
 ```bash
 ./scripts/build-ppa-source.sh --series lts --ppa-rev 2 --ppa-owner jtmoree --ppa-name security-tools
 ```
 
-You can change what `lts` maps to in your local config (useful when the next
-LTS is released):
+You can change what `lts` maps to in your local config if you need to target a
+newer or older LTS release:
 
 ```bash
-# Example: switch lts alias to the next LTS when it becomes available
+# Example: switch lts alias to the new long-term support target
 LUKS_LTS_SERIES=<new-lts-codename>
 LUKS_LTS_SERIES_NUM=26.04
 ```
@@ -282,15 +283,15 @@ cat > ~/.config/luks-root-smartcard/ppa.env <<'EOF'
 LUKS_PPA_OWNER=jtmoree
 LUKS_PPA_NAME=security-tools
 LUKS_DEBSIGN_KEYID=<your-gpg-keyid-or-fingerprint>
-LUKS_LTS_SERIES=noble
-LUKS_LTS_SERIES_NUM=24.04
+LUKS_LTS_SERIES=resolute
+LUKS_LTS_SERIES_NUM=26.04
 EOF
 ```
 
 After that, `--ppa-owner` and `--ppa-name` become optional:
 
 ```bash
-./scripts/build-ppa-source.sh --series noble
+./scripts/build-ppa-source.sh --series resolute
 ```
 
 If multiple secret keys exist, you can override the signer key per run:
