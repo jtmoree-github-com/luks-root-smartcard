@@ -2,7 +2,7 @@
 
 **Smartcard-based LUKS root unlock for Debian/Ubuntu initramfs**
 
-Smartcard integration with root LUKS drives can be complex.  This script integrates smartcard setup and boot with initramfs and LUKS.  Multiple workflows are supported.
+Smartcard integration with root LUKS drives can be complex.  This script integrates smartcard setup and boot with initramfs and LUKS.  Multiple workflows are supported.  The main goal is to unlock encrypted root partitions using hardware rather than passphrases.  Some workflows use a PIN.
 
 - [TPM2 workflow](#quick-start-tpm2) (systemd-tpm2)
 - [FIDO2 workflow](#quick-start-fido2) (systemd-fido2)
@@ -10,9 +10,9 @@ Smartcard integration with root LUKS drives can be complex.  This script integra
 - GPG workflow ([gpg-token](#quick-start-gpg-token) token or [GPG key file](#quick-start-gpg-key-file))
 - [Post-boot drive workflow](#quick-start-mount-token-based-drive-after-boot) (gpg-cryptopen / gpg-cryptmount)
 
-Since systemd is not available during boot on many systems this systemd workflow boots systemd based luks2 smartcard integration without systemd in the initrd.  This may use a TPM or other types of tokens created by systemd-cryptenroll.  
+Systemd is not available during boot on many systems.  When using systemd-tpm2 tokens for LUKS2 encrypted root those systems cannot boot without the passphrase unlock.  This initramfs utility boots systemd based luks2 smartcard integration without systemd in the initrd.  We may use a TPM or other types of tokens created by systemd-cryptenroll instead of typing a passphrase.  
 
-The gpg workflow supports the traditional encrypted key file on disk from stock debian/ubuntu and storing the encrypted key in a luks2 header token.
+Not all systems have a tpm and even they do, systemd-tpm2 may require features that the hardware may not support.  The other workflows allow the same feature of unlocking LUKS with smartcard hardware rather than a passphrase.  For example, the gpg workflow supports the traditional encrypted key file on disk from stock debian/ubuntu but also supports storing the encrypted key in a luks2 header token to remove the need for an unencrpted partition just for the key.
 
 ## How it works
 
