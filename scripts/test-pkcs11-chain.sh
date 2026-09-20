@@ -49,16 +49,34 @@ ok "LUKS2 formatted with passphrase in slot 0"
 echo ""
 echo "=== Step 2: Enroll smartcard via systemd-cryptenroll ==="
 
-# Find the encryption key URI (slot 0 on OpenPGP cards)
-# systemd-cryptenroll refuses "auto" when multiple public keys exist
-PKCS11_URI="$(pkcs11-tool --list-slots 2>/dev/null \
-    | awk '/uri.*User PIN\)$/{sub(/.*uri *: */,""); print; exit}')"
+# Find the encryption key URI on the token.
+# systemd-cryptenroll rejects token-level URIs when they match multiple public keys.
+PKCS11_URI="$(pkcs11-tool --list-objects --slot 0 2>/dev/null \
+    | awk '
+        /^Public Key Object/ { in_pubkey = 1; label = ""; next }
+        in_pubkey && /^  label: *Encryption key$/ { label = 1 }
+        in_pubkey && /^  uri: *pkcs11:/ {
+            if (label) {
+                sub(/^  uri: */, "")
+                print
+                exit
+            }
+        }
+        in_pubkey && NF == 0 { in_pubkey = 0 }
+    ' )"
 if [ -z "$PKCS11_URI" ]; then
-    # fallback: first uri line
-    PKCS11_URI="$(pkcs11-tool --list-slots 2>/dev/null \
-        | awk '/uri *:/{sub(/.*uri *: */,""); print; exit}')"
+    PKCS11_URI="$(pkcs11-tool --list-objects --slot 0 2>/dev/null \
+        | awk '
+            /^Public Key Object/ { in_pubkey = 1; next }
+            in_pubkey && /^  uri: *pkcs11:/ {
+                sub(/^  uri: */, "")
+                print
+                exit
+            }
+            in_pubkey && NF == 0 { in_pubkey = 0 }
+        ' )"
 fi
-[ -n "$PKCS11_URI" ] || die "cannot determine PKCS#11 token URI"
+[ -n "$PKCS11_URI" ] || die "cannot determine PKCS#11 public key URI"
 ok "using token URI: $PKCS11_URI"
 
 echo ">>> You will be prompted for the LUKS passphrase (enter: $PASSPHRASE) <<<"

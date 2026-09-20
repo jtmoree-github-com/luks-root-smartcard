@@ -29,6 +29,23 @@ dbg() {
   echo "smartcard-root-fido2: DEBUG: $*" >&2
 }
 
+prepare_prompt_console() {
+  # Plymouth can hold the graphical framebuffer active even after hide-splash;
+  # quit it and switch to a text console so prompts show without pressing Escape.
+  if command -v plymouth >/dev/null 2>&1; then
+    plymouth --hide-splash >/dev/null 2>&1 || true
+    plymouth --quit >/dev/null 2>&1 || true
+  fi
+  if command -v chvt >/dev/null 2>&1; then
+    chvt 1 >/dev/null 2>&1 || true
+  fi
+  if [ -c /dev/tty1 ]; then
+    exec </dev/tty1 >/dev/tty1 2>/dev/tty1
+  elif [ -c /dev/console ]; then
+    exec </dev/console >/dev/console 2>/dev/console
+  fi
+}
+
 get_root_mapper_name() {
   for tok in $(cat /proc/cmdline); do
     case "$tok" in root=/dev/mapper/*) echo "${tok#root=/dev/mapper/}"; return 0 ;; esac
@@ -98,31 +115,57 @@ find_fido2_plugin_dir() {
   return 1
 }
 
+# Detect an actual FIDO2 authenticator by scanning HID report descriptors for
+# the FIDO alliance usage page (0xF1D0 -> bytes 06 d0 f1); a bare hidraw node
+# is not enough since other HID devices also expose hidraw.
+_fido2_device_present() {
+  # Preferred: libfido2 enumeration gives accurate presence/absence.
+  if command -v fido2-token >/dev/null 2>&1; then
+    if [ -n "$(fido2-token -L 2>/dev/null || true)" ]; then
+      dbg "FIDO2 authenticator detected via fido2-token -L"
+      return 0
+    fi
+    dbg "fido2-token -L found no authenticator"
+    return 1
+  fi
+  # Without fido2-token, fall back to the HID report descriptor, which
+  # advertises the FIDO usage page (0xF1D0 -> bytes 06 d0 f1); this
+  # distinguishes a FIDO2 key from other HID devices.
+  _fido_pat="$(printf '\006\320\361')"
+  for _rd in /sys/class/hidraw/hidraw*/device/report_descriptor; do
+    [ -r "$_rd" ] || continue
+    if grep -qF "$_fido_pat" "$_rd" 2>/dev/null; then
+      dbg "FIDO2 authenticator detected via HID usage page ($_rd)"
+      return 0
+    fi
+  done
+  return 1
+}
+
 wait_for_fido2_device() {
   _try=0
-  while [ "$_try" -lt 10 ]; do
-    for _node in /dev/hidraw*; do
-      [ -c "$_node" ] || continue
-      dbg "found HID device: $_node"
+  while [ "$_try" -lt 5 ]; do
+    if _fido2_device_present; then
       return 0
-    done
+    fi
     _try=$(( _try + 1 ))
-    dbg "waiting for HID device ($_try/10)"
+    dbg "waiting for FIDO2 authenticator ($_try/5)"
     sleep 1
   done
   return 1
 }
 
 prompt_skip_or_wait_fido2() {
-  if [ -f /run/smartcard-skip-requested ]; then
+  if [ -f /run/smartcard-skip-requested-fido2 ]; then
     return 0
   fi
 
-  echo "No FIDO2 authenticator detected for systemd-fido2 flow. Skip FIDO2 and continue with fallback workflows? [Y/n]" >&2
+  prepare_prompt_console
+  echo "FIDO2 security key not detected. Skip and continue with fallback? [Y/n]" > /dev/console
   read ANSWER
   case "${ANSWER:-Y}" in
     y|Y|"")
-      : >/run/smartcard-skip-requested
+      : >/run/smartcard-skip-requested-fido2
       return 0
       ;;
     *)
@@ -139,7 +182,8 @@ prompt_skip_or_wait_fido2() {
 }
 
 prompt_retry_fido2_unlock() {
-  echo "Retry FIDO2 token unlock now? [y/N]" >&2
+  prepare_prompt_console
+  echo "Retry unlock now? [y/N]" > /dev/console
   read ANSWER
   case "${ANSWER:-N}" in
     y|Y) return 0 ;;
@@ -184,6 +228,8 @@ if ! wait_for_fido2_device; then
   fi
 fi
 
+# Dismiss the boot splash before the plugin's PIN prompt on the happy path too.
+prepare_prompt_console
 while true; do
   if cryptsetup luksOpen \
       --token-only \

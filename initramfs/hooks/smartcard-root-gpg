@@ -21,6 +21,14 @@ esac
 
 . /usr/share/initramfs-tools/hook-functions
 
+# Asset inclusion mode, evaluated at initramfs generation time.
+#   all      - include this workflow's assets unconditionally (default)
+#   detected - include only when a matching token is in the root LUKS2 header
+# Override persistently via /etc/luks-root-smartcard/initramfs.conf, or per-run
+# via the SMARTCARD_INITRAMFS_INCLUDE environment variable.
+SMARTCARD_INITRAMFS_INCLUDE="${SMARTCARD_INITRAMFS_INCLUDE:-all}"
+[ -r /etc/luks-root-smartcard/initramfs.conf ] && . /etc/luks-root-smartcard/initramfs.conf
+
 # Token-driven activation: for each crypttab entry, resolve the backing device
 # and scan its LUKS2 header for a gpg-token token. If found, include assets.
 # If a device cannot be resolved at build time, include assets conservatively.
@@ -67,7 +75,7 @@ if [ -f "$_crypttab" ]; then
         fi
     done < "$_crypttab"
 fi
-if [ "$_using_gpg_token" = false ]; then
+if [ "${SMARTCARD_INITRAMFS_INCLUDE:-all}" = "detected" ] && [ "$_using_gpg_token" = false ]; then
     exit 0
 fi
 
@@ -134,11 +142,14 @@ if [ -x /usr/sbin/pcscd ]; then
     done
 fi
 
-copy_exec /usr/bin/gpg
-copy_exec /usr/bin/gpg-agent
-copy_exec /usr/lib/gnupg/scdaemon
-copy_exec /usr/bin/gpgconf
-copy_exec /usr/bin/gpg-connect-agent
+for _gpgbin in /usr/bin/gpg /usr/bin/gpg-agent /usr/lib/gnupg/scdaemon /usr/bin/gpgconf /usr/bin/gpg-connect-agent; do
+    if [ -x "$_gpgbin" ]; then
+        copy_exec "$_gpgbin"
+    else
+        echo "WARNING: $_gpgbin not found; GPG smartcard unlock unavailable" >&2
+        if [ "$_using_gpg_token" = true ]; then RV=1; fi
+    fi
+done
 
 PUBRING="/etc/cryptsetup-initramfs/pubring.gpg"
 if [ -f "$PUBRING" ]; then
@@ -156,7 +167,7 @@ if [ ! -x "$DESTDIR/usr/bin/pinentry" ]; then
         pinentry="/usr/bin/pinentry-tty"
     else
         echo "WARNING: missing pinentry-curses or pinentry-tty" >&2
-        RV=1
+        if [ "$_using_gpg_token" = true ]; then RV=1; fi
     fi
     if [ -n "${pinentry:-}" ]; then
         copy_exec "$pinentry"

@@ -11,3 +11,4 @@ scripts/gpg-cryptenroll usr/sbin/
 scripts/gpg-cryptopen usr/sbin/
 scripts/gpg-cryptmount usr/sbin/
 completion/gpg-cryptenroll usr/share/bash-completion/completions/
+conf/initramfs.conf etc/luks-root-smartcard/

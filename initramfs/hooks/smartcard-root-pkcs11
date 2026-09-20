@@ -21,6 +21,14 @@ esac
 
 . /usr/share/initramfs-tools/hook-functions
 
+# Asset inclusion mode, evaluated at initramfs generation time.
+#   all      - include this workflow's assets unconditionally (default)
+#   detected - include only when a matching token is in the root LUKS2 header
+# Override persistently via /etc/luks-root-smartcard/initramfs.conf, or per-run
+# via the SMARTCARD_INITRAMFS_INCLUDE environment variable.
+SMARTCARD_INITRAMFS_INCLUDE="${SMARTCARD_INITRAMFS_INCLUDE:-all}"
+[ -r /etc/luks-root-smartcard/initramfs.conf ] && . /etc/luks-root-smartcard/initramfs.conf
+
 # Token-driven activation: for each crypttab entry, resolve the backing device
 # and scan its LUKS2 header for a systemd-pkcs11 token. If found, include
 # assets. If a device cannot be resolved at build time, include conservatively.
@@ -66,7 +74,7 @@ if [ -f "$_crypttab" ]; then
         fi
     done < "$_crypttab"
 fi
-if [ "$_using_pkcs11_token" = false ]; then
+if [ "${SMARTCARD_INITRAMFS_INCLUDE:-all}" = "detected" ] && [ "$_using_pkcs11_token" = false ]; then
     exit 0
 fi
 
@@ -84,6 +92,41 @@ if [ -x /usr/bin/pkcs11-tool ]; then
 else
     echo "WARNING: pkcs11-tool not found, PKCS#11 token unlock will not work" >&2
 fi
+
+# Prefer the native cryptsetup systemd-pkcs11 token plugin when present.
+# Copy the plugin and its linked dependencies to avoid runtime load failures
+# inside initramfs.
+_plugin_copied=false
+for plugin in \
+    /usr/lib/*/cryptsetup/libcryptsetup-token-systemd-pkcs11.so \
+    /usr/lib64/cryptsetup/libcryptsetup-token-systemd-pkcs11.so \
+    /lib/*/cryptsetup/libcryptsetup-token-systemd-pkcs11.so \
+    /lib64/cryptsetup/libcryptsetup-token-systemd-pkcs11.so; do
+    [ -f "$plugin" ] || continue
+    copy_exec "$plugin"
+    _plugin_copied=true
+
+    ldd "$plugin" 2>/dev/null \
+        | awk '/=> \/|^\// {print $(NF-1)}' \
+        | while IFS= read -r so; do
+            [ -f "$so" ] && copy_exec "$so"
+        done
+    break
+done
+
+if [ "$_plugin_copied" = false ]; then
+    echo "WARNING: systemd PKCS#11 cryptsetup token plugin not found, plugin unlock will not work" >&2
+fi
+
+# p11-kit metadata is required so the plugin can resolve the OpenSC provider.
+[ -d /usr/share/p11-kit/modules ] && cp -a /usr/share/p11-kit/modules "$DESTDIR/usr/share/p11-kit/" 2>/dev/null || true
+[ -d /etc/pkcs11/modules ] && cp -a /etc/pkcs11/modules "$DESTDIR/etc/pkcs11/" 2>/dev/null || true
+
+# Include p11-kit proxy libraries loaded indirectly by the cryptsetup plugin.
+for p11 in /usr/lib/*/p11-kit-proxy.so /usr/lib/*/pkcs11/p11-kit-trust.so /usr/lib64/p11-kit-proxy.so; do
+    [ -f "$p11" ] || continue
+    copy_exec "$p11"
+done
 
 # OpenSC module is loaded by pkcs11-tool via dlopen(3), so copy it explicitly.
 for mod in \

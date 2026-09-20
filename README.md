@@ -14,6 +14,16 @@ Systemd is not available during boot on many systems.  When using systemd-tpm2 t
 
 Not all systems have a tpm and even they do, systemd-tpm2 may require features that the hardware may not support.  The other workflows allow the same feature of unlocking LUKS with smartcard hardware rather than a passphrase.  For example, the gpg workflow supports the traditional encrypted key file on disk from stock debian/ubuntu but also supports storing the encrypted key in a luks2 header token to remove the need for an unencrpted partition just for the key.
 
+## Local build setup
+
+Before building the Debian package locally, install the required build tools for your distro:
+
+```bash
+sudo ./scripts/build-deps.sh
+```
+
+This helper installs the base build packages on Debian/Ubuntu and Fedora/RHEL-like systems.
+
 ## How it works
 
 At boot, separate `local-top` scripts handle each workflow:
@@ -112,6 +122,39 @@ When a matching smartcard token exists but no smartcard is detected, the user is
 
 When matching tokens exist, workflows attempt unlock and on failure continue to the next workflow before passphrase fallback.
 
+## Initramfs asset inclusion
+
+By default the package copies the runtime assets for **all** workflows (TPM2,
+FIDO2, PKCS#11, GPG) into the initramfs, whether or not a matching token is
+currently enrolled. This lets you enroll a new token type later and have it
+work after a normal `update-initramfs -u`, with no extra setup.
+
+The decision is made at initramfs generation time (`update-initramfs` /
+`mkinitramfs`), not at package build time, and is controlled by a post-install
+toggle at `/etc/luks-root-smartcard/initramfs.conf`:
+
+```
+# all      - include every workflow's assets (default)
+# detected - include only assets for tokens in the root LUKS2 header
+SMARTCARD_INITRAMFS_INCLUDE=all
+```
+
+Change the value and rebuild:
+
+```bash
+sudo update-initramfs -u -k "$(uname -r)"
+```
+
+For a one-off override without editing the file:
+
+```bash
+sudo SMARTCARD_INITRAMFS_INCLUDE=detected update-initramfs -u -k "$(uname -r)"
+```
+
+This setting only controls which assets are bundled. Each boot script still
+activates only when its own token type is present, so including everything does
+not force unused workflows to run.
+
 ## Post-boot naming and mount conventions
 
 - Default mapper name: `luks-<uuid>`
@@ -129,29 +172,19 @@ This runtime fallback avoids hardcoding a distro: some Linux flavors prefer
 `/run/media/<user>` (common on Fedora/RHEL/Arch/openSUSE). If neither is
 available, `~/mnt` is always available as a user-owned fallback.
 
-## PKCS#11 certificate helper
+# Examples (tl;dr)
 
-`scripts/p11cert.sh` generates a short-lived self-signed certificate from a
-PKCS#11 private key and appends it to `~/.eid/authorized_certificates` for
-local smartcard setup workflows.
+Use a `dev` variable in the examples below. For the current root LUKS device,
+this compact detector works well:
 
-Runtime requirements:
-
-- `p11tool`
-- `openssl`
-
-Behavior:
-
-- accepts an explicit `pkcs11:` URL or auto-selects a key using `p11tool`
-- fails fast if the required commands are missing
-- writes `~/.eid/authorized_certificates` atomically
-- skips appending a duplicate certificate for the same PKCS#11 public key
-
+```bash
+dev="/dev/nvmen0p1"
+```
 ## Quick start (FIDO2)
 
 ```bash
 # Enroll FIDO2-based unlock (prompts for LUKS passphrase and token touch/PIN as needed)
-sudo systemd-cryptenroll --fido2-device=auto /dev/<luks-device>
+sudo systemd-cryptenroll --fido2-device=auto "$dev"
 
 # Recommended: set crypttab field 3 to none for token mode
 # (edit /etc/crypttab so the line reads: <name> UUID=<uuid> none luks)
@@ -164,7 +197,13 @@ sudo update-initramfs -u -k "$(uname -r)"
 
 ```bash
 # Enroll the smartcard (prompts for LUKS passphrase and card PIN)
-sudo systemd-cryptenroll --pkcs11-token-uri="auto" /dev/<luks-device>
+sudo systemd-cryptenroll --pkcs11-token-uri="auto" "$dev"
+
+#if multiple keys found and it fails try setting a specific key
+pkcs11-tool --list-slots
+# pick one and set in a variable
+uri=pkcs11:model=PKCS%2315%20emulated;manufacturer=ZeitControl;serial=000500001234;token=OpenPGP%20card%20%28User%20PIN%20%28sig%29%29
+sudo systemd-cryptenroll --pkcs11-token-uri="$uri" "$dev"
 
 # Recommended: set crypttab field 3 to none for token mode
 # (edit /etc/crypttab so the line reads: <name> UUID=<uuid> none luks)
@@ -176,9 +215,8 @@ sudo update-initramfs -u -k "$(uname -r)"
 ## Quick start (TPM2)
 
 ```bash
-dev=/dev/mapper/nvmen1p7
 # Enroll TPM2-based unlock against PCR 7
-sudo systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs=7 $dev
+sudo systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs=7 "$dev"
 
 # Recommended: set crypttab field 3 to none for token mode
 # (edit /etc/crypttab so the line reads: <name> UUID=<uuid> none luks)
@@ -191,11 +229,8 @@ sudo update-initramfs -u -k "$(uname -r)"
 
 ```bash
 # Find your root mapping details
-root_src="$(findmnt -n -o SOURCE /)"
-name="${root_src#/dev/mapper/}"
-
 # Enroll a GPG-encrypted key and store it as a LUKS2 token
-sudo gpg-cryptenroll token:auto /dev/<root-luks-device> --recipient auto --keyslot auto
+sudo gpg-cryptenroll token:auto "$dev" --recipient auto --keyslot auto
 
 # Export your public key for the initramfs
 gpg --export <recipient> >/etc/cryptsetup-initramfs/pubring.gpg
@@ -215,11 +250,8 @@ is not involved.  This example shows how gpg-cryptenroll assists with setting up
 
 ```bash
 # Find your root mapping details
-root_src="$(findmnt -n -o SOURCE /)"
-name="${root_src#/dev/mapper/}"
-
 # Enroll a GPG-encrypted key file
-sudo gpg-cryptenroll file:/boot/root.key.gpg /dev/<root-luks-device> --recipient auto --keyslot auto
+sudo gpg-cryptenroll file:/boot/root.key.gpg "$dev" --recipient auto --keyslot auto
 
 # Export your public key for the initramfs
 gpg --export <recipient> >/etc/cryptsetup-initramfs/pubring.gpg
@@ -236,21 +268,21 @@ sudo update-initramfs -u -k "$(uname -r)"
 
 ```bash
 # Enroll on the drive (same as root — creates a gpg-token in the LUKS2 header)
-sudo gpg-cryptenroll token:auto /dev/<data-drive>
+sudo gpg-cryptenroll token:auto "$dev"
 
 # Later, after boot, unlock it with the smartcard
-sudo gpg-cryptopen /dev/<data-drive>
+sudo gpg-cryptopen "$dev"
 # Opens as /dev/mapper/luks-<uuid> by default.
 
 # Or unlock and mount in one step (recommended for desktop users)
-sudo gpg-cryptmount /dev/<data-drive>
+sudo gpg-cryptmount "$dev"
 # Accepts either a device spec or a /etc/crypttab name.
 
 # Use a key file stored on disk instead of a LUKS2 token
-sudo gpg-cryptopen /dev/<data-drive> --key-spec file:/etc/keys/data-drive.gpg
+sudo gpg-cryptopen "$dev" --key-spec file:/etc/keys/data-drive.gpg
 
 # Mount with explicit key file and mount point
-sudo gpg-cryptmount /dev/<data-drive> --key-spec file:/etc/keys/data-drive.gpg --mount-point /home/$USER/mnt/data
+sudo gpg-cryptmount "$dev" --key-spec file:/etc/keys/data-drive.gpg --mount-point /home/$USER/mnt/data
 ```
 
 ## Build

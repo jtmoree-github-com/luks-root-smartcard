@@ -39,7 +39,7 @@ fi
 kill_by_name pcscd
 
 # Remove initramfs runtime state so real-root daemons start cleanly.
-rm -f /run/pcscd.pid /run/pcscd/pcscd.comm /run/smartcard-skip-requested
+rm -f /run/pcscd.pid /run/pcscd/pcscd.comm /run/smartcard-skip-requested /run/smartcard-skip-requested-fido2 /run/smartcard-skip-requested-pkcs11 /run/smartcard-skip-requested-gpg
 
 # Clean up any leftover key material
 rm -f /run/smartcard-blob.* /run/smartcard-key.* /run/smartcard-b64key.* /run/gpg-card-status.*

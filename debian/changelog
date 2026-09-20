@@ -1,20 +1,27 @@
-luks-root-smartcard-tools (1.1.5) resolute; urgency=medium
+luks-root-smartcard-tools (1.1.9) resolute; urgency=medium
+
+  * run all workflows in initrd by default
+  * allow detection of workflows for smaller initrd
+
+ -- JT Moree <jtmoree@users.noreply.github.com>  Sat, 13 Sep 2026 00:00:00 +0000
+
+luks-root-smartcard-tools (1.1.8) resolute; urgency=medium
 
   * update LTS
 
- -- JT Moree <jtmoree@gmail.com>  Sat, 13 Sep 2026 00:00:00 +0000
+ -- JT Moree <jtmoree@users.noreply.github.com>  Sat, 13 Sep 2026 00:00:00 +0000
 
 luks-root-smartcard-tools (1.1.4) noble; urgency=medium
 
   * add bash completion
 
- -- JT Moree <jtmoree@gmail.com>  Sat, 11 Apr 2026 00:00:00 +0000
+ -- JT Moree <jtmoree@users.noreply.github.com>  Sat, 11 Apr 2026 00:00:00 +0000
 
 luks-root-smartcard-tools (1.1.0~ppa3~ubuntu24.04.1) noble; urgency=medium
 
   * add post boot open and mount tooling
 
- -- JT Moree <jtmoree@gmail.com>  Sat, 11 Apr 2026 00:00:00 +0000
+ -- JT Moree <jtmoree@users.noreply.github.com>  Sat, 11 Apr 2026 00:00:00 +0000
 
 luks-root-smartcard-tools (1.0.33) unstable; urgency=medium
 

@@ -29,6 +29,25 @@ dbg() {
   echo "smartcard-root-pkcs11: DEBUG: $*" >&2
 }
 
+prepare_prompt_console() {
+  # Plymouth can still hold the graphical boot framebuffer active even after
+  # "hide-splash" on newer Ubuntu kernels. Force a text console for the
+  # prompt so the unlock warning remains visible for all users regardless of
+  # their splash settings.
+  if command -v plymouth >/dev/null 2>&1; then
+    plymouth --hide-splash >/dev/null 2>&1 || true
+    plymouth --quit >/dev/null 2>&1 || true
+  fi
+  if command -v chvt >/dev/null 2>&1; then
+    chvt 1 >/dev/null 2>&1 || true
+  fi
+  if [ -c /dev/tty1 ]; then
+    exec </dev/tty1 >/dev/tty1 2>/dev/tty1
+  elif [ -c /dev/console ]; then
+    exec </dev/console >/dev/console 2>/dev/console
+  fi
+}
+
 # This script is token-driven: it scans the root LUKS2 header for
 # systemd-pkcs11 tokens and only activates smartcard handling when present.
 # If no systemd-pkcs11 token exists, it exits without prompting.
@@ -87,6 +106,34 @@ json_value() {
   printf '%s' "$_jv_val"
 }
 
+get_token_field() {
+  _dev="$1"
+  _selector="$2"
+  _field="$3"
+  _token_id="${_selector#*:}"
+
+  _json="$(cryptsetup token export --token-id "$_token_id" "$_dev" 2>/dev/null || true)"
+  [ -n "$_json" ] || return 1
+  _t="$(json_value "$_json" "type" || true)"
+  [ "$_t" = "systemd-pkcs11" ] || return 1
+  json_value "$_json" "$_field"
+}
+
+pkcs11_uri_id_to_hex() {
+  _uri="$1"
+  case "$_uri" in
+    *";id="*)
+      _idpart="${_uri#*;id=}"
+      _idpart="${_idpart%%;*}"
+      _idhex="$(printf '%s' "$_idpart" | tr -d '%')"
+      printf '%s' "$_idhex"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 extract_token_blob() {
   _dev="$1"
   _selector="$2"
@@ -135,22 +182,44 @@ extract_token_blob() {
 }
 
 decrypt_pkcs11() {
+  _input="$1"
+  _output="$2"
+  _idhex="${3:-}"
+
   # Kill scdaemon again in case the GPG script restarted it
   if command -v gpgconf >/dev/null 2>&1; then
     gpgconf --kill scdaemon 2>/dev/null || true
   fi
+
+  if [ -n "$_idhex" ]; then
+    dbg "using token key id for decrypt: $_idhex"
+    pkcs11-tool --decrypt \
+      --mechanism RSA-PKCS \
+      --login \
+      --id "$_idhex" \
+      --input-file "$_input" \
+      --output-file "$_output" 2>&1
+    return $?
+  fi
+
+  dbg "token key id unavailable; falling back to pkcs11-tool default key selection"
   pkcs11-tool --decrypt \
     --mechanism RSA-PKCS \
     --login \
-    --input-file "$1" \
-    --output-file "$2" 2>&1
+    --input-file "$_input" \
+    --output-file "$_output" 2>&1
 }
 
 start_pcscd() {
   command -v pcscd >/dev/null 2>&1 || return 1
+  # Clean stale runtime state from previous failed starts.
+  if [ -f /run/pcscd.pid ] && ! kill -0 "$(cat /run/pcscd.pid 2>/dev/null)" 2>/dev/null; then
+    rm -f /run/pcscd.pid /run/pcscd/pcscd.comm
+  fi
   if ! pidof pcscd >/dev/null 2>&1; then
     msg "starting pcscd (foreground, no polkit)"
     mkdir -p /run/pcscd
+    rm -f /run/pcscd/pcscd.comm
     /usr/sbin/pcscd --foreground --disable-polkit 2>/run/pcscd-stderr.log &
     echo $! >/run/pcscd.pid
     _w=0
@@ -166,12 +235,15 @@ start_pcscd() {
       fi
       [ -e /run/pcscd/pcscd.comm ] && break
     done
+    # Allow reader settle time after pcscd socket appears.
+    sleep 1
   fi
   return 0
 }
 
 check_smartcard() {
   start_pcscd
+  [ "$?" -eq 0 ] || return 1
   # scdaemon (GPG) grabs exclusive access to the reader, blocking pkcs11-tool.
   # Kill it so OpenSC can talk to the card.
   if command -v gpgconf >/dev/null 2>&1; then
@@ -189,15 +261,16 @@ check_smartcard() {
 }
 
 prompt_skip_or_wait() {
-  if [ -f /run/smartcard-skip-requested ]; then
+  if [ -f /run/smartcard-skip-requested-pkcs11 ]; then
     return 0
   fi
 
-  echo "No SmartCard detected for PKCS#11 flow. Skip SmartCard and continue with passphrase fallback? [Y/n]" >&2
+  prepare_prompt_console
+  echo "PKCS#11 smartcard not detected. Skip and continue with fallback? [Y/n]" > /dev/console
   read ANSWER
   case "${ANSWER:-Y}" in
     y|Y|"")
-      : >/run/smartcard-skip-requested
+      : >/run/smartcard-skip-requested-pkcs11
       return 0
       ;;
     *)
@@ -230,7 +303,8 @@ prompt_skip_or_wait() {
 }
 
 prompt_retry_pkcs11_unlock() {
-  echo "Retry PKCS#11 smartcard unlock now? [y/N]" >&2
+  prepare_prompt_console
+  echo "Retry unlock now? [y/N]" > /dev/console
   read ANSWER
   case "${ANSWER:-N}" in
     y|Y) return 0 ;;
@@ -238,9 +312,10 @@ prompt_retry_pkcs11_unlock() {
   esac
 }
 
-auto_detect_pkcs11_token() {
+list_pkcs11_token_selectors() {
   _dev="$1"
   _i=0
+  _found=0
   while [ "$_i" -lt 32 ]; do
     _json="$(cryptsetup token export --token-id "$_i" "$_dev" 2>/dev/null || true)"
     if [ -n "$_json" ]; then
@@ -248,12 +323,12 @@ auto_detect_pkcs11_token() {
       dbg "token $_i type=${_t:-unknown}"
       if [ "$_t" = "systemd-pkcs11" ]; then
         echo "systemd-pkcs11:$_i"
-        return 0
+        _found=1
       fi
     fi
     _i=$(( _i + 1 ))
   done
-  return 1
+  [ "$_found" -eq 1 ]
 }
 
 mapping="$(resolve_mapping "$(get_root_mapper_name)")"
@@ -275,13 +350,17 @@ dbg "resolved backing device: $DEV"
 
 # Always detect from the LUKS2 header so custom handling runs whenever a
 # systemd-pkcs11 token exists on the root device.
-KEY_SPEC="$(auto_detect_pkcs11_token "$DEV" || true)"
-if [ -z "$KEY_SPEC" ]; then
+TOKEN_SELECTORS="$(list_pkcs11_token_selectors "$DEV" || true)"
+if [ -z "$TOKEN_SELECTORS" ]; then
   dbg "no systemd-pkcs11 token found on root device; exiting PKCS#11 path"
   exit 0
 fi
-msg "auto-detected token selector: $KEY_SPEC"
+msg "auto-detected token selectors: $TOKEN_SELECTORS"
 SMARTCARD_EXPECT="1"
+
+if ! start_pcscd; then
+  msg "pcscd failed to start; PKCS#11 decrypt may not work"
+fi
 
 CARD_FOUND=false
 if [ "$SMARTCARD_EXPECT" = "1" ]; then
@@ -310,53 +389,71 @@ fi
 
 TMP_KEY="$(mktemp /run/smartcard-key.XXXXXX)"
 chmod 600 "$TMP_KEY"
+# Hide the boot splash before the card PIN prompt on the happy path too.
+prepare_prompt_console
 while true; do
   unlock_ok=false
+  decrypt_ok_but_open_failed=false
 
-  BLOB="$(extract_token_blob "$DEV" "$KEY_SPEC" || true)"
-  if [ -z "$BLOB" ]; then
-    dbg "failed to extract pkcs11-key blob from token selector $KEY_SPEC"
-  elif decrypt_pkcs11 "$BLOB" "$TMP_KEY"; then
-    dbg "pkcs11-tool decrypt succeeded; converting plaintext to base64 for luksOpen"
-    TMP_B64="$(mktemp /run/smartcard-b64key.XXXXXX)"
-    chmod 600 "$TMP_B64"
-    base64 -w0 < "$TMP_KEY" > "$TMP_B64"
-
-    if cryptsetup luksOpen "$DEV" "$CRYPTROOT_NAME" --key-file "$TMP_B64"; then
-      unlock_ok=true
-      dbg "cryptsetup luksOpen succeeded via PKCS#11"
-    else
-      dbg "cryptsetup luksOpen failed after successful PKCS#11 decrypt"
+  for KEY_SPEC in $TOKEN_SELECTORS; do
+    msg "trying PKCS#11 token selector: $KEY_SPEC"
+    TOKEN_URI="$(get_token_field "$DEV" "$KEY_SPEC" "pkcs11-uri" || true)"
+    TOKEN_KEY_ID="$(pkcs11_uri_id_to_hex "$TOKEN_URI" || true)"
+    if [ -n "$TOKEN_URI" ]; then
+      msg "token URI: $TOKEN_URI"
     fi
-    rm -f "$TMP_B64"
-  else
-    dbg "pkcs11-tool decrypt failed for selector $KEY_SPEC"
-  fi
+    if [ -n "$TOKEN_KEY_ID" ]; then
+      msg "token URI key id: $TOKEN_KEY_ID"
+    else
+      msg "no token key id found; falling back to default object selection"
+    fi
+    BLOB="$(extract_token_blob "$DEV" "$KEY_SPEC" || true)"
+    if [ -z "$BLOB" ]; then
+      dbg "failed to extract pkcs11-key blob from token selector $KEY_SPEC"
+      msg "token selector $KEY_SPEC: extracted blob missing"
+      continue
+    fi
 
-  rm -f "${BLOB:-}"
+    if decrypt_pkcs11 "$BLOB" "$TMP_KEY" "$TOKEN_KEY_ID"; then
+      msg "PKCS#11 decrypt succeeded with token selector: $KEY_SPEC"
+      TMP_B64="$(mktemp /run/smartcard-b64key.XXXXXX)"
+      chmod 600 "$TMP_B64"
+      base64 -w0 < "$TMP_KEY" > "$TMP_B64"
+      if cryptsetup luksOpen "$DEV" "$CRYPTROOT_NAME" --key-file "$TMP_B64"; then
+        unlock_ok=true
+        msg "cryptsetup luksOpen succeeded via PKCS#11 using $KEY_SPEC"
+        dbg "cryptsetup luksOpen succeeded via PKCS#11 using $KEY_SPEC"
+      else
+        decrypt_ok_but_open_failed=true
+        msg "cryptsetup luksOpen failed after PKCS#11 decrypt using $KEY_SPEC"
+        dbg "cryptsetup luksOpen failed after successful PKCS#11 decrypt for $KEY_SPEC"
+      fi
+      rm -f "$TMP_B64"
+    else
+      msg "PKCS#11 decrypt failed for token selector: $KEY_SPEC"
+      dbg "pkcs11-tool decrypt failed for selector $KEY_SPEC"
+    fi
+
+    rm -f "$BLOB"
+    [ "$unlock_ok" = true ] && break
+  done
 
   if [ "$unlock_ok" = true ]; then
     rm -f "$TMP_KEY"
     exit 0
   fi
 
-  msg "PKCS#11 decrypt failed"
-  if [ "$SMARTCARD_EXPECT" = "1" ]; then
-    if prompt_skip_or_wait; then
-      rm -f "$TMP_KEY"
-      msg "bypassing PKCS#11 smartcard; continuing to standard cryptroot fallback"
-      exit 0
-    fi
-    if prompt_retry_pkcs11_unlock; then
-      msg "user requested retry of PKCS#11 unlock"
-      continue
-    fi
+  msg "PKCS#11 unlock attempt failed"
+  if [ "$decrypt_ok_but_open_failed" = true ]; then
     rm -f "$TMP_KEY"
-    msg "not retrying PKCS#11 unlock; continuing to standard cryptroot fallback"
+    msg "decrypted key was rejected by cryptsetup; not retrying PKCS#11 in this boot path"
     exit 0
   fi
-
+  if prompt_retry_pkcs11_unlock; then
+    msg "user requested retry of PKCS#11 unlock"
+    continue
+  fi
   rm -f "$TMP_KEY"
-  msg "PKCS#11 flow failed in non-interactive mode; continuing to standard cryptroot fallback"
+  msg "not retrying PKCS#11 unlock; continuing to standard cryptroot fallback"
   exit 0
 done

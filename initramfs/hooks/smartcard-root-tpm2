@@ -21,6 +21,14 @@ esac
 
 . /usr/share/initramfs-tools/hook-functions
 
+# Asset inclusion mode, evaluated at initramfs generation time.
+#   all      - include this workflow's assets unconditionally (default)
+#   detected - include only when a matching token is in the root LUKS2 header
+# Override persistently via /etc/luks-root-smartcard/initramfs.conf, or per-run
+# via the SMARTCARD_INITRAMFS_INCLUDE environment variable.
+SMARTCARD_INITRAMFS_INCLUDE="${SMARTCARD_INITRAMFS_INCLUDE:-all}"
+[ -r /etc/luks-root-smartcard/initramfs.conf ] && . /etc/luks-root-smartcard/initramfs.conf
+
 _resolve_dev_hook() {
     case "$1" in
         UUID=*)      blkid -U "${1#UUID=}" 2>/dev/null ;;
@@ -63,7 +71,7 @@ if [ -f "$_crypttab" ]; then
         fi
     done < "$_crypttab"
 fi
-if [ "$_using_tpm2_token" = false ]; then
+if [ "${SMARTCARD_INITRAMFS_INCLUDE:-all}" = "detected" ] && [ "$_using_tpm2_token" = false ]; then
     exit 0
 fi
 
@@ -87,7 +95,7 @@ done
 
 if [ "$_plugin_copied" = false ]; then
     echo "WARNING: systemd TPM2 cryptsetup token plugin not found, TPM2 token unlock will not work" >&2
-    RV=1
+    if [ "$_using_tpm2_token" = true ]; then RV=1; fi
 fi
 
 # Copy TSS2 libraries — libsystemd-shared dlopen's these at runtime so they
