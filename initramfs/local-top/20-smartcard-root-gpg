@@ -46,6 +46,7 @@ prepare_prompt_console() {
   elif [ -c /dev/console ]; then
     exec </dev/console >/dev/console 2>/dev/console
   fi
+  export TERM=linux
 }
 
 # This script is token-driven: it scans the root LUKS2 header for gpg-token
@@ -165,6 +166,8 @@ decrypt_gpg() {
     GPG_TTY="/dev/$_console"
   fi
   export GPG_TTY
+
+  echo "DEBUG: TERM=$TERM GPG_TTY=$GPG_TTY" > /dev/console
 
   # Keep the normal GnuPG agent + pinentry flow alive.  The stock
   # initramfs decrypt_gnupg-sc script does not kill scdaemon/gpg-agent

@@ -102,7 +102,7 @@ root_crypt UUID=<uuid> /boot/root.key.gpg luks
 token workflow:
 
 ```
-root_crypt UUID=<uuid> none luks
+root_crypt UUID=<uuid> none
 ```
 
 ## Smartcard expectation trigger

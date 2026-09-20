@@ -160,19 +160,21 @@ if [ -f "$PUBRING" ]; then
     find "$DESTDIR/cryptroot" -name "*~" -type f -delete
 fi
 
-if [ ! -x "$DESTDIR/usr/bin/pinentry" ]; then
-    if [ -x "/usr/bin/pinentry-curses" ]; then
-        pinentry="/usr/bin/pinentry-curses"
-    elif [ -x "/usr/bin/pinentry-tty" ]; then
-        pinentry="/usr/bin/pinentry-tty"
-    else
-        echo "WARNING: missing pinentry-curses or pinentry-tty" >&2
-        if [ "$_using_gpg_token" = true ]; then RV=1; fi
-    fi
-    if [ -n "${pinentry:-}" ]; then
-        copy_exec "$pinentry"
-        ln -s "$pinentry" "$DESTDIR/usr/bin/pinentry"
-    fi
+pinentry=""
+if [ -x "/usr/bin/pinentry-curses" ]; then
+    pinentry="/usr/bin/pinentry-curses"
+elif [ -x "/usr/bin/pinentry-tty" ]; then
+    pinentry="/usr/bin/pinentry-tty"
+elif [ -x "$DESTDIR/usr/bin/pinentry" ]; then
+    : # Use existing pinentry from another hook
+else
+    echo "WARNING: missing pinentry-curses or pinentry-tty" >&2
+    if [ "$_using_gpg_token" = true ]; then RV=1; fi
+fi
+if [ -n "${pinentry:-}" ]; then
+    copy_exec "$pinentry"
+    rm -f "$DESTDIR/usr/bin/pinentry"
+    ln -s "$(basename "$pinentry")" "$DESTDIR/usr/bin/pinentry"
 fi
 
 for d in "/usr/share/terminfo" "/lib/terminfo"; do
