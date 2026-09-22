@@ -1,7 +1,7 @@
 Source: luks-root-smartcard-tools
 Section: admin
 Priority: optional
-Maintainer: JT Moree <jtmoree@gmail.com>
+Maintainer: JT Moree <jtmoree@users.noreply.github.com>
 Build-Depends: debhelper-compat (= 13)
 Standards-Version: 4.7.0
 Rules-Requires-Root: no
