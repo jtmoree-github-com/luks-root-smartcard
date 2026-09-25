@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 CL="$PROJECT_ROOT/debian/changelog"
 CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/luks-root-smartcard/ppa.env"
+DEVSCRIPTS_FILE="$HOME/.devscripts"
 
 SERIES=""
 PPA_REV="1"
@@ -65,6 +66,12 @@ if [ -r "$CONFIG_FILE" ]; then
   SIGN_KEY="${SIGN_KEY:-${LUKS_DEBSIGN_KEYID:-${DEBSIGN_KEYID:-}}}"
   LTS_SERIES="${LTS_SERIES:-${LUKS_LTS_SERIES:-resolute}}"
   LTS_SERIES_NUM="${LTS_SERIES_NUM:-${LUKS_LTS_SERIES_NUM:-26.04}}"
+fi
+
+# Fallback: honor ~/.devscripts DEBSIGN_KEYID when no sign key was provided.
+if [ -z "$SIGN_KEY" ] && [ -r "$DEVSCRIPTS_FILE" ]; then
+  DEVSCRIPTS_KEY="$(sed -n 's/^[[:space:]]*DEBSIGN_KEYID[[:space:]]*=[[:space:]]*\([^#[:space:]]\+\).*$/\1/p' "$DEVSCRIPTS_FILE" | tail -n1)"
+  SIGN_KEY="${DEVSCRIPTS_KEY:-}"
 fi
 
 while [ "$#" -gt 0 ]; do

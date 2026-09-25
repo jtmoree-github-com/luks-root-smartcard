@@ -34,33 +34,38 @@ This helper installs the base build packages on Debian/Ubuntu and Fedora/RHEL-li
 Build Launchpad-ready source artifacts and rotate the top changelog entry for a target Ubuntu series:
 
 ```bash
-./scripts/build-ppa-source.sh --series noble --ppa-owner jtmoree --ppa-name security-tools
+PPAOWNER=jtmoree
+PPANAME=security-tools
+```
+
+```bash
+./scripts/build-ppa-source.sh --series noble --ppa-owner "$PPAOWNER" --ppa-name "$PPANAME"
 ```
 
 For the current development series (questing), switch the series:
 
 ```bash
-./scripts/build-ppa-source.sh --series questing --ppa-rev 1 --ppa-owner jtmoree --ppa-name security-tools
+./scripts/build-ppa-source.sh --series questing --ppa-rev 1 --ppa-owner "$PPAOWNER" --ppa-name "$PPANAME"
 ```
 
 For the current LTS, use `lts` (currently maps to resolute):
 
 ```bash
-./scripts/build-ppa-source.sh --series lts --ppa-rev 2 --ppa-owner jtmoree --ppa-name security-tools
+./scripts/build-ppa-source.sh --series lts --ppa-rev 2 --ppa-owner "$PPAOWNER" --ppa-name "$PPANAME"
 ```
 
 You can change what `lts` maps to in your local config if you need to target a newer or older LTS release:
 
 ```bash
 # Example: switch lts alias to the new long-term support target
-LUKS_LTS_SERIES=<new-lts-codename>
+LUKS_LTS_SERIES=resolute
 LUKS_LTS_SERIES_NUM=26.04
 ```
 
 For Jammy, switch the series:
 
 ```bash
-./scripts/build-ppa-source.sh --series jammy --ppa-rev 2 --ppa-owner jtmoree --ppa-name security-tools
+./scripts/build-ppa-source.sh --series jammy --ppa-rev 2 --ppa-owner "$PPAOWNER" --ppa-name "$PPANAME"
 ```
 
 Set Launchpad defaults once so you do not need to pass owner/name every time:
@@ -75,6 +80,8 @@ LUKS_LTS_SERIES=resolute
 LUKS_LTS_SERIES_NUM=26.04
 EOF
 ```
+
+For smart-card backed keys, set `LUKS_DEBSIGN_KEYID` to the full fingerprint of the card key you use for signing. This avoids email/UID auto-selection issues when the changelog maintainer address differs from the key UID.
 
 After that, `--ppa-owner` and `--ppa-name` become optional:
 
@@ -92,6 +99,46 @@ If your local signing key is not configured yet, build unsigned source artifacts
 
 ```bash
 ./scripts/build-ppa-source.sh --series noble --unsigned
+```
+
+## PPA signing with smart cards
+
+When your primary certifying key is not stored locally (for example, `sec#` with `ssb>` card subkeys), adding a new UID/email with `gpg --edit-key adduid` may fail because GnuPG requires secret-key material for certification.
+
+In that case, sign PPA source builds by explicitly selecting the signer key fingerprint:
+
+```bash
+./scripts/build-ppa-source.sh --series resolute --sign-key <full-key-fingerprint>
+```
+
+Or set it once in `~/.config/luks-root-smartcard/ppa.env`:
+
+```bash
+LUKS_DEBSIGN_KEYID=<full-key-fingerprint>
+```
+
+Optional global fallback for devscripts/debsign:
+
+```bash
+DEBSIGN_KEYID=<full-key-fingerprint>
+```
+
+`build-ppa-source.sh` also reads `DEBSIGN_KEYID` from `~/.devscripts` when `--sign-key`, `LUKS_DEBSIGN_KEYID`, and `DEBSIGN_KEYID` are not already set in the environment/config.
+
+### Troubleshooting: `No secret key` for GitHub noreply email
+
+If you see:
+
+```text
+gpg: skipped "JT Moree <jtmoree@users.noreply.github.com>": No secret key
+```
+
+it usually means GnuPG tried to sign using the changelog maintainer identity instead of your smart-card key ID. Force the key with `--sign-key` or `LUKS_DEBSIGN_KEYID` as shown above.
+
+You can verify signing works with the selected key before running the PPA build:
+
+```bash
+echo test | gpg --local-user <full-key-fingerprint> --clearsign >/tmp/gpg-sign-test.asc
 ```
 
 ## Package layout

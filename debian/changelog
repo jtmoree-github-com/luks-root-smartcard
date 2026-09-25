@@ -1,4 +1,4 @@
-luks-root-smartcard-tools (1.1.9) resolute; urgency=medium
+luks-root-smartcard-tools (1.1.9~ppa1~ubuntu26.04.1) resolute; urgency=medium
 
   * run all workflows in initrd by default
   * allow detection of workflows for smaller initrd
