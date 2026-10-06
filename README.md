@@ -15,9 +15,9 @@ Supported workflows include:
 
 ## Additional notes
 
-- Systemd is not available during boot on many systems but systemd luks2 tokens are well supported.
+- Systemd is not available during boot on many systems but systemd luks2 tokens are well supported after boot.  This utility bridges the gap.
 - Not all systems have a TPM, and even when they do, systemd-tpm2 may require hardware features that are not available.
-- The GPG workflow may leverage the stock Debian/Ubuntu encrypted key-file on disk or the LUKS2 header token workflow, which avoids keeping a key file on a drive.
+- The GPG workflow may leverage the stock Debian/Ubuntu encrypted key-file on disk or the LUKS2 header token workflow, which avoids keeping a key file on a drive when using a smartcard.
 
 ## Documentation
 
@@ -25,3 +25,7 @@ Supported workflows include:
 - [Examples](docs/EXAMPLES.md)
 - [Build and packaging](docs/BUILD.md)
 - [Testing](docs/TESTING.md)
+
+## License
+
+This project is licensed under the MIT (Expat) license. See [LICENSE](LICENSE) and [debian/copyright](debian/copyright).
