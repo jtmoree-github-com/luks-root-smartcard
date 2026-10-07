@@ -194,7 +194,7 @@ decrypt_pkcs11() {
 
   if [ -n "$_idhex" ]; then
     dbg "using token key id for decrypt: $_idhex"
-    pkcs11-tool --decrypt \
+    pkcs11-tool --module /usr/lib/x86_64-linux-gnu/opensc-pkcs11.so --decrypt \
       --mechanism RSA-PKCS \
       --login \
       --id "$_idhex" \
@@ -204,7 +204,7 @@ decrypt_pkcs11() {
   fi
 
   dbg "token key id unavailable; falling back to pkcs11-tool default key selection"
-  pkcs11-tool --decrypt \
+  pkcs11-tool --module /usr/lib/x86_64-linux-gnu/opensc-pkcs11.so --decrypt \
     --mechanism RSA-PKCS \
     --login \
     --input-file "$_input" \
@@ -221,7 +221,7 @@ start_pcscd() {
     msg "starting pcscd (foreground, no polkit)"
     mkdir -p /run/pcscd
     rm -f /run/pcscd/pcscd.comm
-    /usr/sbin/pcscd --foreground --disable-polkit 2>/run/pcscd-stderr.log &
+    /usr/sbin/pcscd --foreground --debug --disable-polkit >/run/pcscd-stderr.log 2>&1 &
     echo $! >/run/pcscd.pid
     _w=0
     while [ "$_w" -lt 3 ]; do
@@ -254,7 +254,7 @@ check_smartcard() {
   # --list-token-slots only lists slots with a token (card) actually present.
   # It exits non-zero and produces no output when no card is inserted.
   if command -v pkcs11-tool >/dev/null 2>&1; then
-    if pkcs11-tool --list-token-slots >/dev/null 2>&1; then
+    if pkcs11-tool --module /usr/lib/x86_64-linux-gnu/opensc-pkcs11.so --list-token-slots >/dev/null 2>&1; then
       return 0
     fi
   fi
@@ -332,7 +332,7 @@ list_pkcs11_token_selectors() {
   [ "$_found" -eq 1 ]
 }
 
-mapping="$(resolve_mapping "$(get_root_mapper_name)")"
+mapping="$(resolve_mapping "sda5_crypt")"
 CRYPTROOT_NAME="${mapping%%|*}"
 rest="${mapping#*|}"
 CRYPTROOT_SOURCE="${rest%%|*}"
@@ -359,10 +359,9 @@ fi
 msg "auto-detected token selectors: $TOKEN_SELECTORS"
 SMARTCARD_EXPECT="1"
 
-if ! start_pcscd; then
-  msg "pcscd failed to start; PKCS#11 decrypt may not work"
-fi
 
+udevadm settle --timeout=10 || true
+sleep 5
 CARD_FOUND=false
 if [ "$SMARTCARD_EXPECT" = "1" ]; then
   dbg "smartcard expectation enabled (interactive mode)"
@@ -445,6 +444,7 @@ while true; do
   fi
 
   msg "PKCS#11 unlock attempt failed"
+  tail -n 60 /run/pcscd-stderr.log >&2
   if [ "$decrypt_ok_but_open_failed" = true ]; then
     rm -f "$TMP_KEY"
     msg "decrypted key was rejected by cryptsetup; not retrying PKCS#11 in this boot path"

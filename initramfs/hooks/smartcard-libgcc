@@ -1,0 +1,16 @@
+#!/bin/sh
+set -e
+
+case "${1:-}" in
+    prereqs) exit 0 ;;
+esac
+
+. /usr/share/initramfs-tools/hook-functions
+
+libgcc=$(ldconfig -p | awk '$1 == "libgcc_s.so.1" {print $NF; exit}')
+[ -n "$libgcc" ] && [ -f "$libgcc" ] || {
+    echo "Cannot locate libgcc_s.so.1" >&2
+    exit 1
+}
+
+copy_exec "$libgcc"
