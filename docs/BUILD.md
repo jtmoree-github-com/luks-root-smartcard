@@ -147,6 +147,7 @@ echo test | gpg --local-user <full-key-fingerprint> --clearsign >/tmp/gpg-sign-t
 |------|---------|
 | /usr/share/initramfs-tools/hooks/smartcard-root-pkcs11 | Initramfs hook for PKCS#11 workflow (pkcs11-tool, pcscd, CCID stack, base64 helpers) |
 | /usr/share/initramfs-tools/hooks/smartcard-root-gpg | Initramfs hook for GPG workflow (gpg, scdaemon — no pcscd; scdaemon uses its built-in CCID driver) |
+| /usr/share/initramfs-tools/hooks/smartcard-root-common | Initramfs hook for shared runtime helpers used by stock cryptroot cleanup (realpath) |
 | /usr/share/initramfs-tools/hooks/smartcard-root-fido2 | Initramfs hook for FIDO2 workflow (systemd-fido2 cryptsetup token plugin, libfido2, HID drivers) |
 | /usr/share/initramfs-tools/hooks/smartcard-root-tpm2 | Initramfs hook for TPM2 workflow (systemd-tpm2 cryptsetup token plugin and TPM drivers) |
 | /usr/share/initramfs-tools/scripts/local-top/05-smartcard-root-fido2 | Boot script for systemd-fido2 token unlock via cryptsetup token plugin |

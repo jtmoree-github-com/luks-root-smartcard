@@ -1,0 +1,31 @@
+#!/bin/sh
+
+# Common initramfs assets needed by all smartcard workflows.
+# Debian's stock cryptroot local-bottom cleanup uses realpath() when removing
+# mapped devices, so we must bundle it even on fallback boot paths.
+
+set -e
+
+PREREQ="cryptroot"
+
+prereqs()
+{
+    echo "$PREREQ"
+}
+
+case "$1" in
+    prereqs)
+        prereqs
+        exit 0
+        ;;
+esac
+
+. /usr/share/initramfs-tools/hook-functions
+
+for _realpath in /usr/bin/realpath /bin/realpath /usr/local/bin/realpath; do
+    if [ -x "$_realpath" ]; then
+        copy_exec "$_realpath"
+        break
+    fi
+done
+

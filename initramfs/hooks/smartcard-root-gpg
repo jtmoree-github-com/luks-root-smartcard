@@ -151,9 +151,10 @@ for _gpgbin in /usr/bin/gpg /usr/bin/gpg-agent /usr/lib/gnupg/scdaemon /usr/bin/
     fi
 done
 
+[ -d "$DESTDIR/cryptroot/gnupghome" ] || mkdir -pm0700 "$DESTDIR/cryptroot/gnupghome"
+
 PUBRING="/etc/cryptsetup-initramfs/pubring.gpg"
 if [ -f "$PUBRING" ]; then
-    [ -d "$DESTDIR/cryptroot/gnupghome" ] || mkdir -pm0700 "$DESTDIR/cryptroot/gnupghome"
     /usr/bin/gpg --no-options --no-autostart --trust-model=always \
         --quiet --batch --no-tty --logger-file=/dev/null \
         --homedir="$DESTDIR/cryptroot/gnupghome" --import <"$PUBRING"

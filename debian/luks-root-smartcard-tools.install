@@ -1,4 +1,5 @@
 initramfs/hooks/smartcard-root-gpg usr/share/initramfs-tools/hooks/
+initramfs/hooks/smartcard-root-common usr/share/initramfs-tools/hooks/
 initramfs/hooks/smartcard-root-pkcs11 usr/share/initramfs-tools/hooks/
 initramfs/hooks/smartcard-root-fido2 usr/share/initramfs-tools/hooks/
 initramfs/hooks/smartcard-root-tpm2 usr/share/initramfs-tools/hooks/

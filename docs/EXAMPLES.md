@@ -15,6 +15,9 @@ This is the Debian-managed stock GPG key-file workflow: the encrypted key stays 
 ### enroll
 
 ```bash
+# Install the workflow stack if needed
+sudo apt install gnupg scdaemon pcscd cryptsetup-initramfs
+
 # Find your root mapping details
 # Enroll a GPG-encrypted key file in the stock Debian/Ubuntu style
 sudo gpg-cryptenroll file:/boot/root.key.gpg "$dev" --recipient auto --keyslot auto
@@ -46,13 +49,20 @@ sudo rm -f /boot/root.key.gpg /etc/cryptsetup-initramfs/pubring.gpg
 sudo update-initramfs -u -k "$(uname -r)"
 ```
 
-## FIDO2
+## GPG token
 
 ### enroll
 
 ```bash
-# Enroll FIDO2-based unlock (prompts for LUKS passphrase and token touch/PIN as needed)
-sudo systemd-cryptenroll --fido2-device=auto "$dev"
+# Install the workflow stack if needed
+sudo apt install gnupg scdaemon pcscd
+
+# Find your root mapping details
+# Enroll a GPG-encrypted key and store it as a LUKS2 token
+sudo gpg-cryptenroll token:auto "$dev" --recipient auto --keyslot auto
+
+# Export your public key for the initramfs
+gpg --export <recipient> >/etc/cryptsetup-initramfs/pubring.gpg
 
 # Recommended: set crypttab field 3 to none for token mode
 # (edit /etc/crypttab so the line reads: <name> UUID=<uuid> none luks)
@@ -64,8 +74,16 @@ sudo update-initramfs -u -k "$(uname -r)"
 ### remove
 
 ```bash
-# Remove all FIDO2 enrollments from this LUKS device
-sudo systemd-cryptenroll --wipe-slot=fido2 "$dev"
+# List token ids (see "Tokens:" section) and locate type "gpg-token"
+sudo cryptsetup luksDump "$dev"
+tokenid=<token-id>
+sudo cryptsetup token export --token-id $tokenid "$dev"
+
+# Remove the token metadata
+sudo cryptsetup token remove --token-id $tokenid "$dev"
+
+# Remove the associated keyslot used by that token
+sudo cryptsetup luksKillSlot "$dev" <slot>
 
 # Rebuild initramfs
 sudo update-initramfs -u -k "$(uname -r)"
@@ -76,6 +94,9 @@ sudo update-initramfs -u -k "$(uname -r)"
 ### enroll
 
 ```bash
+# Install the workflow stack if needed
+sudo apt install opensc pcscd
+
 # Enroll the smartcard (prompts for LUKS passphrase and card PIN)
 sudo systemd-cryptenroll --pkcs11-token-uri="auto" "$dev"
 
@@ -107,11 +128,42 @@ sudo systemd-cryptenroll --wipe-slot=pkcs11 "$dev"
 sudo update-initramfs -u -k "$(uname -r)"
 ```
 
+## FIDO2
+
+### enroll
+
+```bash
+# Install the workflow stack if needed
+sudo apt install libfido2-1 fido2-tools
+
+# Enroll FIDO2-based unlock (prompts for LUKS passphrase and token touch/PIN as needed)
+sudo systemd-cryptenroll --fido2-device=auto "$dev"
+
+# Recommended: set crypttab field 3 to none for token mode
+# (edit /etc/crypttab so the line reads: <name> UUID=<uuid> none luks)
+
+# Rebuild initramfs
+sudo update-initramfs -u -k "$(uname -r)"
+```
+
+### remove
+
+```bash
+# Remove all FIDO2 enrollments from this LUKS device
+sudo systemd-cryptenroll --wipe-slot=fido2 "$dev"
+
+# Rebuild initramfs
+sudo update-initramfs -u -k "$(uname -r)"
+```
+
 ## TPM2
 
 ### enroll
 
 ```bash
+# Install the workflow stack if needed
+sudo apt install systemd-cryptsetup
+
 # Enroll TPM2-based unlock against PCR 7
 sudo systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs=7 "$dev"
 
@@ -127,42 +179,6 @@ sudo update-initramfs -u -k "$(uname -r)"
 ```bash
 # Remove all TPM2 enrollments from this LUKS device
 sudo systemd-cryptenroll --wipe-slot=tpm2 "$dev"
-
-# Rebuild initramfs
-sudo update-initramfs -u -k "$(uname -r)"
-```
-
-## GPG token
-
-### enroll
-
-```bash
-# Find your root mapping details
-# Enroll a GPG-encrypted key and store it as a LUKS2 token
-sudo gpg-cryptenroll token:auto "$dev" --recipient auto --keyslot auto
-
-# Export your public key for the initramfs
-gpg --export <recipient> >/etc/cryptsetup-initramfs/pubring.gpg
-
-# Recommended: set crypttab field 3 to none for token mode
-# (edit /etc/crypttab so the line reads: <name> UUID=<uuid> none luks)
-
-# Rebuild initramfs
-sudo update-initramfs -u -k "$(uname -r)"
-```
-
-### remove
-
-```bash
-# List token ids and locate type "gpg-token"
-sudo cryptsetup token list "$dev"
-sudo cryptsetup token export --token-id <token-id> "$dev"
-
-# Remove the token metadata
-sudo cryptsetup token remove --token-id <token-id> "$dev"
-
-# Remove the associated keyslot used by that token
-sudo cryptsetup luksKillSlot "$dev" <slot>
 
 # Rebuild initramfs
 sudo update-initramfs -u -k "$(uname -r)"
@@ -195,9 +211,10 @@ sudo gpg-cryptmount "$dev" --key-spec file:/etc/keys/data-drive.gpg --mount-poin
 
 ```bash
 # Remove token mode (find gpg-token id, remove token, then remove its keyslot)
-sudo cryptsetup token list "$dev"
-sudo cryptsetup token export --token-id <token-id> "$dev"
-sudo cryptsetup token remove --token-id <token-id> "$dev"
+sudo cryptsetup luksDump "$dev"
+tokenid=<token-id>
+sudo cryptsetup token export --token-id $tokenid "$dev"
+sudo cryptsetup token remove --token-id $tokenid "$dev"
 sudo cryptsetup luksKillSlot "$dev" <slot>
 
 # If you enrolled file-based unlocks for this drive, remove those slots too

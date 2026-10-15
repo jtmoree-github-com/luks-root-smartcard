@@ -1,3 +1,12 @@
+luks-root-smartcard-tools (1.1.11) resolute; urgency=medium
+
+  * add runtime boot debug toggle via kernel cmdline flags
+  * add debug-only end-of-workflow summary line with reason codes
+  * add timestamped probe/start counters for GPG smartcard diagnostics
+  * improve setup of gpg token by assisting user with public key setup
+
+ -- JT Moree <jtmoree@users.noreply.github.com>  Wed, 7 Oct 2026 00:00:00 +0000
+
 luks-root-smartcard-tools (1.1.10~ppa3~ubuntu26.04.1) resolute; urgency=medium
 
   * fix license files

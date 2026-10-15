@@ -72,6 +72,18 @@ run_as_user() {
     fi
 }
 
+run_privileged() {
+    if [ "$(id -u)" -eq 0 ]; then
+        "$@"
+        return
+    fi
+    if command -v sudo >/dev/null 2>&1; then
+        sudo "$@"
+        return
+    fi
+    die "sudo is required for privileged operations such as LUKS changes and /etc/cryptsetup-initramfs/pubring.gpg updates"
+}
+
 die() {
   echo "gpg-cryptenroll: $*" >&2
   exit 1
@@ -223,7 +235,7 @@ is_root_luks_device() {
   case "$_root_src" in
     /dev/mapper/*)
       _root_name="${_root_src#/dev/mapper/}"
-      _root_backing="$(cryptsetup status "$_root_name" 2>/dev/null | awk '/^[[:space:]]*device:[[:space:]]+/ { print $2; exit }')"
+      _root_backing="$(run_privileged cryptsetup status "$_root_name" 2>/dev/null | awk '/^[[:space:]]*device:[[:space:]]+/ { print $2; exit }')"
       [ -n "$_root_backing" ] || return 1
       _root_real="$(readlink -f "$_root_backing" 2>/dev/null || echo "$_root_backing")"
       ;;
@@ -258,6 +270,215 @@ print_crypttab_guidance() {
     echo "  Also copy the public key for initramfs:" >&2
     echo "    gpg --export <recipient> >/etc/cryptsetup-initramfs/pubring.gpg" >&2
   fi
+}
+
+print_root_warning() {
+  echo "gpg-cryptenroll: This script normally runs as your desktop user, not root." >&2
+  echo "gpg-cryptenroll: Some operations may need sudo: LUKS keyslot/token changes and" >&2
+  echo "gpg-cryptenroll: writing /etc/cryptsetup-initramfs/pubring.gpg for the initramfs GPG path." >&2
+  echo "gpg-cryptenroll: This script does not rebuild initramfs for you; run update-initramfs after setup." >&2
+}
+
+find_card_pubkey_url() {
+  _card_status="$(run_as_user gpg --batch --no-tty --card-status 2>/dev/null || true)"
+  [ -n "$_card_status" ] || return 1
+
+  _raw="$(printf '%s\n' "$_card_status" | tr -d '\r')"
+  _url="$(printf '%s\n' "$_raw" | awk 'BEGIN{IGNORECASE=1}
+  {
+    line = $0
+    if (match(line, /https?:\/\/[[:graph:]]+/)) {
+      print substr(line, RSTART, RLENGTH)
+      exit
+    }
+    if (tolower(line) ~ /public key/ && tolower(line) ~ /url/) {
+      if (line ~ /: *$/) {
+        getline next_line
+        if (match(next_line, /https?:\/\/[[:graph:]]+/)) {
+          print substr(next_line, RSTART, RLENGTH)
+          exit
+        }
+      }
+      if (match(line, /:[[:space:]]*[[:graph:]]+/)) {
+        s = substr(line, RSTART, RLENGTH)
+        sub(/^[^:]*:[[:space:]]*/, "", s)
+        if (s ~ /https?:\/\//) {
+          print s
+          exit
+        }
+      }
+    }
+    if (tolower(line) ~ /url/ || tolower(line) ~ /keyserver/) {
+      if (line ~ /: *$/) {
+        getline next_line
+        if (match(next_line, /https?:\/\/[[:graph:]]+/)) {
+          print substr(next_line, RSTART, RLENGTH)
+          exit
+        }
+      }
+      if (match(line, /:[[:space:]]*[[:graph:]]+/)) {
+        s = substr(line, RSTART, RLENGTH)
+        sub(/^[^:]*:[[:space:]]*/, "", s)
+        if (s ~ /https?:\/\//) {
+          print s
+          exit
+        }
+      }
+    }
+  }' | awk 'NF { print; exit }')"
+
+  if [ -n "$_url" ]; then
+    printf '%s\n' "$_url"
+    return 0
+  fi
+  return 1
+}
+
+pubring_contains_fpr() {
+  _fpr="$1"
+  [ -n "$_fpr" ] || return 1
+  [ -r /etc/cryptsetup-initramfs/pubring.gpg ] || return 1
+  gpg --batch --no-options --no-default-keyring --keyring /etc/cryptsetup-initramfs/pubring.gpg --with-colons --list-keys "$_fpr" >/dev/null 2>&1
+}
+
+export_user_pubkey_to_system_pubring() {
+  _fpr="$1"
+  [ -n "$_fpr" ] || return 1
+
+  _tmp="$(mktemp /tmp/gpg-cryptenroll-pubkey.XXXXXX)"
+  if ! run_as_user gpg --batch --yes --export "$_fpr" >"$_tmp" 2>/dev/null; then
+    rm -f "$_tmp"
+    return 1
+  fi
+
+  if [ "$(id -u)" -eq 0 ]; then
+    mkdir -p /etc/cryptsetup-initramfs
+    chmod 700 /etc/cryptsetup-initramfs 2>/dev/null || true
+    if gpg --batch --quiet --no-options --no-default-keyring --keyring /etc/cryptsetup-initramfs/pubring.gpg --import "$_tmp" >/dev/null 2>&1; then
+      rm -f "$_tmp"
+      return 0
+    fi
+    rm -f "$_tmp"
+    return 1
+  fi
+
+  if command -v sudo >/dev/null 2>&1; then
+    if sudo mkdir -p /etc/cryptsetup-initramfs 2>/dev/null && \
+       sudo sh -c "gpg --batch --quiet --no-options --no-default-keyring --keyring /etc/cryptsetup-initramfs/pubring.gpg --import '$_tmp' >/dev/null 2>&1"; then
+      rm -f "$_tmp"
+      return 0
+    fi
+  fi
+
+  rm -f "$_tmp"
+  return 1
+}
+
+fetch_public_key_for_setup() {
+  _fpr="$1"
+  _url="$2"
+  [ -n "$_url" ] || return 1
+  echo "gpg-cryptenroll: downloading public key for ${_fpr} from ${_url} ..." >&2
+  if run_as_user gpg --batch --yes --fetch-keys "$_url" >/dev/null 2>&1; then
+    :
+  else
+    echo "gpg-cryptenroll: failed to fetch the public key into the current user keyring" >&2
+    return 1
+  fi
+
+  if [ -n "${SUDO_USER:-}" ] || [ "$(id -u)" -ne 0 ]; then
+    if command -v sudo >/dev/null 2>&1; then
+      if sudo sh -c "mkdir -p /etc/cryptsetup-initramfs && gpg --batch --quiet --no-options --no-default-keyring --keyring /etc/cryptsetup-initramfs/pubring.gpg --fetch-keys '$_url' >/dev/null 2>&1"; then
+        return 0
+      fi
+    fi
+  else
+    if gpg --batch --quiet --no-options --no-default-keyring --keyring /etc/cryptsetup-initramfs/pubring.gpg --fetch-keys "$_url" >/dev/null 2>&1; then
+      return 0
+    fi
+  fi
+
+  echo "gpg-cryptenroll: failed to install the public key into /etc/cryptsetup-initramfs/pubring.gpg" >&2
+  return 1
+}
+
+ensure_public_key_readiness() {
+  _card_fpr="$(find_card_encryption_fpr || true)"
+  [ -n "$_card_fpr" ] || return 0
+
+  if run_as_user gpg --batch --with-colons --list-keys "$_card_fpr" >/dev/null 2>&1; then
+    dbg "ensure_public_key_readiness: card public key already visible to user keyring"
+    if pubring_contains_fpr "$_card_fpr"; then
+      dbg "ensure_public_key_readiness: pubring already contains card public key"
+      return 0
+    fi
+
+    echo "gpg-cryptenroll: smartcard detected, but /etc/cryptsetup-initramfs/pubring.gpg does not yet contain the required public key for this card." >&2
+    echo "gpg-cryptenroll: Attempting to export the public key from the current user keyring into /etc/cryptsetup-initramfs/pubring.gpg ..." >&2
+    if export_user_pubkey_to_system_pubring "$_card_fpr"; then
+      echo "gpg-cryptenroll: exported the public key into /etc/cryptsetup-initramfs/pubring.gpg" >&2
+      return 0
+    fi
+
+    _pubkey_url="$(find_card_pubkey_url || true)"
+    if [ -n "$_pubkey_url" ]; then
+      echo "gpg-cryptenroll: Local export failed; trying to fetch the public key from the card metadata URL." >&2
+      if fetch_public_key_for_setup "$_card_fpr" "$_pubkey_url"; then
+        return 0
+      fi
+    fi
+
+    echo "gpg-cryptenroll: This key must be present for the initramfs GPG decrypt path to work at boot." >&2
+    echo "gpg-cryptenroll: Fix by exporting your card public key and installing it into /etc/cryptsetup-initramfs/pubring.gpg" >&2
+    echo "gpg-cryptenroll: Example:" >&2
+    echo "  gpg --export $_card_fpr | sudo tee /etc/cryptsetup-initramfs/pubring.gpg >/dev/null" >&2
+    echo "gpg-cryptenroll: Then run: sudo update-initramfs -u -k \"\$(uname -r)\"" >&2
+    exit 1
+  fi
+
+  _pubkey_url="$(find_card_pubkey_url || true)"
+  if [ -n "$_pubkey_url" ]; then
+    echo "gpg-cryptenroll: Smartcard detected, but the public key is not in the current user keyring." >&2
+    echo "gpg-cryptenroll: A public-key URL was found on the smartcard metadata: ${_pubkey_url}" >&2
+    printf 'gpg-cryptenroll: Download and install that public key for the current user and initramfs pubring? [y/N] ' >&2
+    IFS= read -r _answer || _answer="n"
+    case "${_answer:-n}" in
+      y|Y|yes|YES)
+        if fetch_public_key_for_setup "$_card_fpr" "$_pubkey_url"; then
+          :
+        else
+          echo "gpg-cryptenroll: The public key could not be imported automatically." >&2
+          echo "gpg-cryptenroll: Manually export the public key and install it into:" >&2
+          echo "  ~/.gnupg (for your current user)" >&2
+          echo "  /etc/cryptsetup-initramfs/pubring.gpg (for initramfs boot)" >&2
+          echo "gpg-cryptenroll: Example:" >&2
+          echo "  gpg --export $_card_fpr > /tmp/card-pubkey.asc" >&2
+          echo "  gpg --import /tmp/card-pubkey.asc" >&2
+          echo "  sudo install -m 0600 /tmp/card-pubkey.asc /etc/cryptsetup-initramfs/pubring.gpg" >&2
+          echo "gpg-cryptenroll: Then run: sudo update-initramfs -u -k \"\$(uname -r)\"" >&2
+          exit 1
+        fi
+        ;;
+      *)
+        echo "gpg-cryptenroll: The public key is required for the initramfs GPG decrypt path." >&2
+        echo "gpg-cryptenroll: Export it and place it in /etc/cryptsetup-initramfs/pubring.gpg, then rerun the setup." >&2
+        echo "gpg-cryptenroll: Example:" >&2
+        echo "  gpg --export $_card_fpr | sudo tee /etc/cryptsetup-initramfs/pubring.gpg >/dev/null" >&2
+        echo "gpg-cryptenroll: Then run: sudo update-initramfs -u -k \"\$(uname -r)\"" >&2
+        exit 1
+        ;;
+    esac
+    return 0
+  fi
+
+  echo "gpg-cryptenroll: Smartcard detected, but the matching public key is not usable in this environment." >&2
+  echo "gpg-cryptenroll: This is required for the initramfs GPG decrypt path at boot." >&2
+  echo "gpg-cryptenroll: No public-key URL was found on the smartcard metadata." >&2
+  echo "gpg-cryptenroll: To finish setup later, export the public key and place it in /etc/cryptsetup-initramfs/pubring.gpg" >&2
+  echo "gpg-cryptenroll: Example:" >&2
+  echo "  gpg --export $(printf '%s' "$_card_fpr") | sudo tee /etc/cryptsetup-initramfs/pubring.gpg >/dev/null" >&2
+  echo "gpg-cryptenroll: Then run: sudo update-initramfs -u -k \"\$(uname -r)\"" >&2
+  exit 1
 }
 
 resolve_auto_recipient() {
@@ -305,7 +526,7 @@ resolve_auto_recipient() {
 
 list_enabled_keyslots() {
   _dev="$1"
-  cryptsetup luksDump "$_dev" 2>/dev/null \
+  run_privileged cryptsetup luksDump "$_dev" 2>/dev/null \
     | awk '
         /^Key Slot [0-9]+: ENABLED$/ {
           s=$0
@@ -333,11 +554,11 @@ import_luks2_gpg_token() {
   _force="$6"
   _meta_keyslot="$7"
 
-  cryptsetup isLuks "$_dev" 2>/dev/null || die "$_dev is not a LUKS device"
+  run_privileged cryptsetup isLuks "$_dev" 2>/dev/null || die "$_dev is not a LUKS device"
 
   # When an explicit token id is requested, refuse to overwrite unless --force.
   if [ "$_tid" != "auto" ]; then
-    _existing="$(cryptsetup token export --token-id "$_tid" "$_dev" 2>/dev/null || true)"
+    _existing="$(run_privileged cryptsetup token export --token-id "$_tid" "$_dev" 2>/dev/null || true)"
     if [ -n "$_existing" ]; then
       if [ "$_force" -ne 1 ]; then
         die "token id $_tid already exists on $_dev (use --force to overwrite)"
@@ -367,7 +588,7 @@ EOF
   fi
 
   # shellcheck disable=SC2086
-  if ! cryptsetup token import $_token_args --json-file "$_json_tmp" "$_dev"; then
+  if ! run_privileged cryptsetup token import $_token_args --json-file "$_json_tmp" "$_dev"; then
     rm -f "$_json_tmp"
     die "failed to import gpg-token token"
   fi
@@ -396,8 +617,12 @@ else
   dbg "detected non-root LUKS target: $LUKS_DEVICE"
 fi
 
-# Modifying LUKS keyslots/tokens requires root privileges.
-[ "$(id -u)" -eq 0 ] || die "root privileges are required to enroll keys/tokens on $LUKS_DEVICE"
+print_root_warning
+
+# Modifying LUKS keyslots/tokens requires root privileges, but smartcard key
+# management generally belongs to the desktop user. If we need a system-level
+# pubring or LUKS mutation, the user can use sudo explicitly at that step.
+[ "$(id -u)" -eq 0 ] || echo "gpg-cryptenroll: continuing as your user; sudo will be used only for privileged steps as needed." >&2
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -468,6 +693,8 @@ if [ "$RECIPIENT" = "auto" ]; then
   RECIPIENT="$(resolve_auto_recipient)"
   echo "Auto-selected recipient: $RECIPIENT"
 fi
+
+ensure_public_key_readiness
 
 case "$SIZE_BYTES" in
   ''|*[!0-9]*)
@@ -563,7 +790,7 @@ if [ -n "$KEYSLOT" ]; then
     *) die "--keyslot must be 'auto' or a slot number (0-31)" ;;
   esac
 
-  cryptsetup isLuks "$LUKS_DEVICE" 2>/dev/null \
+  run_privileged cryptsetup isLuks "$LUKS_DEVICE" 2>/dev/null \
     || die "$LUKS_DEVICE is not a LUKS device"
 
   if [ "$KEYSLOT" = "auto" ]; then
@@ -571,7 +798,7 @@ if [ -n "$KEYSLOT" ]; then
     _slots_before_file="$(mktemp /dev/shm/luks-slots-before.XXXXXX)"
     _slots_after_file="$(mktemp /dev/shm/luks-slots-after.XXXXXX)"
     list_enabled_keyslots "$LUKS_DEVICE" >"$_slots_before_file" || true
-    cryptsetup luksAddKey "$LUKS_DEVICE" "$PLAIN_KEY"
+    run_privileged cryptsetup luksAddKey "$LUKS_DEVICE" "$PLAIN_KEY"
     list_enabled_keyslots "$LUKS_DEVICE" >"$_slots_after_file" || true
     ENROLLED_KEYSLOT="$(awk 'NR==FNR { have[$1]=1; next } !have[$1] { print; exit }' "$_slots_before_file" "$_slots_after_file")"
     if [ -z "$ENROLLED_KEYSLOT" ]; then
@@ -582,7 +809,7 @@ if [ -n "$KEYSLOT" ]; then
     echo "Key successfully enrolled."
   else
     # Check whether the requested slot is already occupied.
-    if cryptsetup luksDump "$LUKS_DEVICE" 2>/dev/null \
+    if run_privileged cryptsetup luksDump "$LUKS_DEVICE" 2>/dev/null \
          | grep -qE "(^Key Slot ${KEYSLOT}: ENABLED|^[[:space:]]+${KEYSLOT}: luks)"; then
       echo "Slot $KEYSLOT is occupied; replacing (passphrase required once) ..."
       _PASS_TMP="$(mktemp /dev/shm/luks-auth.XXXXXX)"
@@ -596,8 +823,8 @@ if [ -n "$KEYSLOT" ]; then
       printf '\n' >&2
       printf '%s' "$_auth_pass" > "$_PASS_TMP"
       unset _auth_pass
-      cryptsetup luksKillSlot  --key-file "$_PASS_TMP" "$LUKS_DEVICE" "$KEYSLOT"
-      cryptsetup luksAddKey    --new-key-slot "$KEYSLOT" --key-file "$_PASS_TMP" \
+      run_privileged cryptsetup luksKillSlot  --key-file "$_PASS_TMP" "$LUKS_DEVICE" "$KEYSLOT"
+      run_privileged cryptsetup luksAddKey    --new-key-slot "$KEYSLOT" --key-file "$_PASS_TMP" \
         "$LUKS_DEVICE" "$PLAIN_KEY"
       rm -f "$_PASS_TMP"
       trap - EXIT INT TERM
@@ -605,7 +832,7 @@ if [ -n "$KEYSLOT" ]; then
       echo "Slot $KEYSLOT replaced successfully."
     else
       echo "Enrolling key into slot $KEYSLOT on $LUKS_DEVICE ..."
-      cryptsetup luksAddKey --new-key-slot "$KEYSLOT" "$LUKS_DEVICE" "$PLAIN_KEY"
+      run_privileged cryptsetup luksAddKey --new-key-slot "$KEYSLOT" "$LUKS_DEVICE" "$PLAIN_KEY"
       ENROLLED_KEYSLOT="$KEYSLOT"
       echo "Key successfully enrolled in slot $KEYSLOT."
     fi

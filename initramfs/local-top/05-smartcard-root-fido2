@@ -19,7 +19,12 @@ esac
 DEBUG_ENABLED=0
 for _dbg_tok in $(cat /proc/cmdline 2>/dev/null); do
   case "$_dbg_tok" in
-    rd.debug*) DEBUG_ENABLED=1; break ;;
+    rd.debug|rd.debug=1|rd.debug=true|smartcard-root.debug|smartcard-root.debug=1|smartcard-root.debug=true)
+      DEBUG_ENABLED=1
+      ;;
+    rd.debug=0|rd.debug=false|smartcard-root.debug=0|smartcard-root.debug=false)
+      DEBUG_ENABLED=0
+      ;;
   esac
 done
 
@@ -28,6 +33,18 @@ dbg() {
   [ "$DEBUG_ENABLED" = "1" ] || return 0
   echo "smartcard-root-fido2: DEBUG: $*" >&2
 }
+DEBUG_SUMMARY_RESULT="fallback"
+DEBUG_SUMMARY_REASON="unclassified"
+set_debug_summary() {
+  DEBUG_SUMMARY_RESULT="$1"
+  DEBUG_SUMMARY_REASON="$2"
+}
+emit_debug_summary() {
+  [ "$DEBUG_ENABLED" = "1" ] || return 0
+  dbg "summary result=$DEBUG_SUMMARY_RESULT reason=$DEBUG_SUMMARY_REASON mapper=${CRYPTROOT_NAME:-unset} device=${DEV:-unset}"
+}
+trap emit_debug_summary EXIT
+dbg "debug logging enabled"
 
 prepare_prompt_console() {
   # Plymouth can hold the graphical framebuffer active even after hide-splash;
@@ -110,9 +127,11 @@ auto_detect_fido2_token() {
 find_fido2_plugin_dir() {
   for _dir in /usr/lib/*/cryptsetup /usr/lib64/cryptsetup; do
     [ -f "$_dir/libcryptsetup-token-systemd-fido2.so" ] || continue
+    dbg "found FIDO2 plugin dir: $_dir"
     echo "$_dir"
     return 0
   done
+  dbg "no FIDO2 plugin dir found in initramfs search paths"
   return 1
 }
 
@@ -140,6 +159,7 @@ _fido2_device_present() {
       return 0
     fi
   done
+  dbg "no FIDO2 HID report descriptor matched usage page 0xF1D0"
   return 1
 }
 
@@ -158,12 +178,14 @@ wait_for_fido2_device() {
 
 prompt_skip_or_wait_fido2() {
   if [ -f /run/smartcard-skip-requested-fido2 ]; then
+    dbg "skip marker already present for FIDO2 workflow"
     return 0
   fi
 
   prepare_prompt_console
   echo "FIDO2 security key not detected. Skip and continue with fallback? [Y/n]" > /dev/console
   read ANSWER
+  dbg "user response for FIDO2 skip prompt: ${ANSWER:-<empty>}"
   case "${ANSWER:-Y}" in
     y|Y|"")
       : >/run/smartcard-skip-requested-fido2
@@ -186,6 +208,7 @@ prompt_retry_fido2_unlock() {
   prepare_prompt_console
   echo "Retry unlock now? [y/N]" > /dev/console
   read ANSWER
+  dbg "user response for FIDO2 retry prompt: ${ANSWER:-<empty>}"
   case "${ANSWER:-N}" in
     y|Y) return 0 ;;
     *)   return 1 ;;
@@ -202,6 +225,7 @@ dbg "mapping name=$CRYPTROOT_NAME source=$CRYPTROOT_SOURCE key-spec=${KEY_SPEC:-
 
 if cryptsetup status "$CRYPTROOT_NAME" >/dev/null 2>&1; then
   dbg "mapping $CRYPTROOT_NAME already active"
+  set_debug_summary "skip" "mapping-already-active"
   exit 0
 fi
 
@@ -212,6 +236,7 @@ dbg "resolved backing device: $DEV"
 TOKEN_ID="$(auto_detect_fido2_token "$DEV" || true)"
 if [ -z "$TOKEN_ID" ]; then
   dbg "no systemd-fido2 token found on root device; exiting FIDO2 path"
+  set_debug_summary "skip" "no-systemd-fido2-token"
   exit 0
 fi
 msg "auto-detected token selector: systemd-fido2:$TOKEN_ID"
@@ -219,12 +244,15 @@ msg "auto-detected token selector: systemd-fido2:$TOKEN_ID"
 PLUGIN_DIR="$(find_fido2_plugin_dir || true)"
 if [ -z "$PLUGIN_DIR" ]; then
   msg "FIDO2 token plugin not present in initramfs; continuing to next workflow"
+  set_debug_summary "fallback" "missing-fido2-plugin"
   exit 0
 fi
+dbg "using FIDO2 plugin dir: $PLUGIN_DIR"
 
 if ! wait_for_fido2_device; then
   if prompt_skip_or_wait_fido2; then
     msg "skipping FIDO2 workflow; continuing to next workflow"
+    set_debug_summary "fallback" "user-skipped-no-fido2-device"
     exit 0
   fi
 fi
@@ -232,19 +260,28 @@ fi
 # Dismiss the boot splash before the plugin's PIN prompt on the happy path too.
 prepare_prompt_console
 while true; do
+  _fido2_open_log="$(mktemp /run/smartcard-fido2-open.XXXXXX)"
   if cryptsetup luksOpen \
       --token-only \
       --token-type systemd-fido2 \
       --token-id "$TOKEN_ID" \
       --external-tokens-path "$PLUGIN_DIR" \
-      "$DEV" "$CRYPTROOT_NAME"; then
+      "$DEV" "$CRYPTROOT_NAME" 2>"$_fido2_open_log"; then
     dbg "cryptsetup luksOpen succeeded via FIDO2 token"
+    set_debug_summary "success" "fido2-unlock"
+    rm -f "$_fido2_open_log"
     exit 0
   fi
+  dbg "cryptsetup luksOpen failed via FIDO2 token"
+  if [ "$DEBUG_ENABLED" = "1" ]; then
+    sed 's/^/smartcard-root-fido2: DEBUG: cryptsetup: /' "$_fido2_open_log" >&2 2>/dev/null || true
+  fi
+  rm -f "$_fido2_open_log"
 
   msg "FIDO2 unlock failed"
   if prompt_skip_or_wait_fido2; then
     msg "bypassing FIDO2 workflow; continuing to next workflow"
+    set_debug_summary "fallback" "user-skipped-after-fido2-failure"
     exit 0
   fi
   if prompt_retry_fido2_unlock; then
@@ -252,5 +289,6 @@ while true; do
     continue
   fi
   msg "not retrying FIDO2 unlock; continuing to next workflow"
+  set_debug_summary "fallback" "user-declined-fido2-retry"
   exit 0
 done

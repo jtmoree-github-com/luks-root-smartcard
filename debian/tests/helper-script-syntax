@@ -72,4 +72,13 @@ do
 	}
 done
 
+if ! awk '
+	/mkdir -pm0700 "\$DESTDIR\/cryptroot\/gnupghome"/ { mkdir_line=NR }
+	/^PUBRING="\/etc\/cryptsetup-initramfs\/pubring\.gpg"$/ { pubring_line=NR }
+	END { exit !(mkdir_line && pubring_line && mkdir_line < pubring_line) }
+' initramfs/hooks/smartcard-root-gpg; then
+	echo "GPG hook must create /cryptroot/gnupghome before optional pubring import" >&2
+	exit 1
+fi
+
 echo "helper script syntax checks passed"

@@ -19,7 +19,12 @@ esac
 DEBUG_ENABLED=0
 for _dbg_tok in $(cat /proc/cmdline 2>/dev/null); do
   case "$_dbg_tok" in
-    rd.debug*) DEBUG_ENABLED=1; break ;;
+    rd.debug|rd.debug=1|rd.debug=true|smartcard-root.debug|smartcard-root.debug=1|smartcard-root.debug=true)
+      DEBUG_ENABLED=1
+      ;;
+    rd.debug=0|rd.debug=false|smartcard-root.debug=0|smartcard-root.debug=false)
+      DEBUG_ENABLED=0
+      ;;
   esac
 done
 
@@ -28,6 +33,18 @@ dbg() {
   [ "$DEBUG_ENABLED" = "1" ] || return 0
   echo "smartcard-root-tpm2: DEBUG: $*" >&2
 }
+DEBUG_SUMMARY_RESULT="fallback"
+DEBUG_SUMMARY_REASON="unclassified"
+set_debug_summary() {
+  DEBUG_SUMMARY_RESULT="$1"
+  DEBUG_SUMMARY_REASON="$2"
+}
+emit_debug_summary() {
+  [ "$DEBUG_ENABLED" = "1" ] || return 0
+  dbg "summary result=$DEBUG_SUMMARY_RESULT reason=$DEBUG_SUMMARY_REASON mapper=${CRYPTROOT_NAME:-unset} device=${DEV:-unset}"
+}
+trap emit_debug_summary EXIT
+dbg "debug logging enabled"
 
 get_root_mapper_name() {
   for tok in $(cat /proc/cmdline); do
@@ -92,9 +109,11 @@ auto_detect_tpm2_token() {
 find_tpm_plugin_dir() {
   for _dir in /usr/lib/*/cryptsetup /usr/lib64/cryptsetup; do
     [ -f "$_dir/libcryptsetup-token-systemd-tpm2.so" ] || continue
+    dbg "found TPM2 plugin dir: $_dir"
     echo "$_dir"
     return 0
   done
+  dbg "no TPM2 plugin dir found in initramfs search paths"
   return 1
 }
 
@@ -123,6 +142,7 @@ dbg "mapping name=$CRYPTROOT_NAME source=$CRYPTROOT_SOURCE key-spec=${KEY_SPEC:-
 
 if cryptsetup status "$CRYPTROOT_NAME" >/dev/null 2>&1; then
   dbg "mapping $CRYPTROOT_NAME already active"
+  set_debug_summary "skip" "mapping-already-active"
   exit 0
 fi
 
@@ -133,6 +153,7 @@ dbg "resolved backing device: $DEV"
 TOKEN_ID="$(auto_detect_tpm2_token "$DEV" || true)"
 if [ -z "$TOKEN_ID" ]; then
   dbg "no systemd-tpm2 token found on root device; exiting TPM2 path"
+  set_debug_summary "skip" "no-systemd-tpm2-token"
   exit 0
 fi
 msg "auto-detected token selector: systemd-tpm2:$TOKEN_ID"
@@ -140,23 +161,36 @@ msg "auto-detected token selector: systemd-tpm2:$TOKEN_ID"
 PLUGIN_DIR="$(find_tpm_plugin_dir || true)"
 if [ -z "$PLUGIN_DIR" ]; then
   msg "TPM2 token plugin not present in initramfs; continuing to standard cryptroot fallback"
+  set_debug_summary "fallback" "missing-tpm2-plugin"
   exit 0
 fi
+dbg "using TPM2 plugin dir: $PLUGIN_DIR"
 
 if ! wait_for_tpm_device; then
+  dbg "no TPM character device found after wait loop"
   msg "TPM2 device not detected; continuing to standard cryptroot fallback"
+  set_debug_summary "fallback" "no-tpm-device"
   exit 0
 fi
 
+_tpm2_open_log="$(mktemp /run/smartcard-tpm2-open.XXXXXX)"
 if cryptsetup luksOpen \
     --token-only \
     --token-type systemd-tpm2 \
     --token-id "$TOKEN_ID" \
     --external-tokens-path "$PLUGIN_DIR" \
-    "$DEV" "$CRYPTROOT_NAME"; then
+    "$DEV" "$CRYPTROOT_NAME" 2>"$_tpm2_open_log"; then
   dbg "cryptsetup luksOpen succeeded via TPM2 token"
+  set_debug_summary "success" "tpm2-unlock"
+  rm -f "$_tpm2_open_log"
   exit 0
 fi
+dbg "cryptsetup luksOpen failed via TPM2 token"
+if [ "$DEBUG_ENABLED" = "1" ]; then
+  sed 's/^/smartcard-root-tpm2: DEBUG: cryptsetup: /' "$_tpm2_open_log" >&2 2>/dev/null || true
+fi
+rm -f "$_tpm2_open_log"
 
 msg "TPM2 unlock failed; continuing to standard cryptroot fallback"
+set_debug_summary "fallback" "tpm2-unlock-failed"
 exit 0
