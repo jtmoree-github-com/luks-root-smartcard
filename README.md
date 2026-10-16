@@ -2,7 +2,9 @@
 
 **Smartcard-based LUKS root unlock for Debian/Ubuntu initramfs**
 
-This project integrates smartcard setup and boot with initramfs and LUKS so encrypted root volumes can be unlocked with hardware instead of a passphrase and without requiring systemd in initrd.
+This project integrates smartcard setup and boot with initramfs and LUKS so encrypted root volumes can be unlocked with hardware (e.g. tpm, gpg, fido) with passphrase fallback without requiring systemd in initrd.
+
+Your options may be constrained by your hardware and LUKS version.
 
 ## Supported workflows:
 
@@ -29,8 +31,9 @@ At boot, separate `local-top` scripts handle each workflow:
 ## Additional notes
 
 - Systemd is not available during boot on many systems but systemd luks2 tokens are well supported after boot.  This utility bridges the boot gap for initramfs without using systemd.
-- Not all systems have a TPM, and even when they do, systemd-tpm2 may require hardware features that are not available.
-- Multiple GPG workflows are supported including stock debian decrypt.
+- Not all systems have a TPM, and even when they do, systemd-tpm2 may require hardware features that are not available.  This utility expands the options for root decrypt.
+- Multiple GPG workflows are supported including stock debian decrypt.  `gpg-cryptenroll` assists with setup.
+- LUKS version 1 only supports the stock debian keyfile on disk.  Tokens used by the others are a LUKS 2 feature.
 
 ## Documentation
 
