@@ -69,8 +69,8 @@ See the [GPG token example](EXAMPLES.md#gpg-token).
 - Install the workflow stack:
   - `sudo apt install gnupg scdaemon pcscd`
 - Smartcard with an OpenPGP-compatible key exposed to GnuPG
+- Ensure the matching public key is present in the source user keyring (`~/.gnupg`) before the initramfs is rebuilt; the hook exports from that keyring and imports into initramfs `GNUPGHOME`
 - Enroll with *gpg-cryptenroll token:auto ...*
-- Ensure the matching public key is present in the user keyring and in `/etc/cryptsetup-initramfs/pubring.gpg` before the initramfs is rebuilt
 
 #### Boot
 
@@ -184,9 +184,9 @@ journalctl -k -b | grep 'smartcard-root-gpg'
 
 By default the package copies the runtime assets for all workflows (TPM2, FIDO2, PKCS#11, GPG) into the initramfs, whether or not a matching token is currently enrolled. This lets you enroll a new token type later and have it work after a normal `update-initramfs -u`, with no extra setup.
 
-For the GPG workflow, the hook always creates `/cryptroot/gnupghome` inside the initramfs so `gpg --card-status`, `gpg-agent`, and `scdaemon` have a writable homedir at boot. If `/etc/cryptsetup-initramfs/pubring.gpg` exists, its public keys are imported into that homedir during initramfs generation.
+For the GPG workflows, the hook always creates `/cryptroot/gnupghome` inside the initramfs so `gpg --card-status`, `gpg-agent`, and `scdaemon` have a writable homedir at boot. For `gpg-token`, the hook exports public keys from the configured source user keyring and imports them into that homedir during initramfs generation. By default this uses the invoking `sudo` user (`~/.gnupg`), and can be overridden with `SMARTCARD_GPG_SOURCE_HOME` or `SMARTCARD_GPG_SOURCE_USER` in `/etc/luks-root-smartcard/initramfs.conf`.  Stock Debian GPG key-file workflow uses `/etc/cryptsetup-initramfs/pubring.gpg`.
 
-The decision is made at initramfs generation time (`update-initramfs` / `mkinitramfs`), not at package build time, and is controlled by a post-install toggle at `/etc/luks-root-smartcard/initramfs.conf`:
+A decision is made at initramfs generation time (`update-initramfs` / `mkinitramfs`), not at package build time, and is controlled by a post-install toggle at `/etc/luks-root-smartcard/initramfs.conf` whether or not to include all workflows in the boot process or just the detected workflows:
 
 ```text
 # all      - include every workflow's assets (default)

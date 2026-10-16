@@ -2,6 +2,15 @@
 
 This file contains the common setup examples and quick-start commands. For prerequisites, boot behavior, and package internals, see [SETUP.md](SETUP.md). For package builds and release prep, see [BUILD.md](BUILD.md).
 
+## Table of contents
+
+- [Stock Debian/Ubuntu GPG key file](#stock-debianubuntu-gpg-key-file)
+- [GPG token](#gpg-token)
+- [systemd-pkcs11](#systemd-pkcs11)
+- [FIDO2](#fido2)
+- [TPM2](#tpm2)
+- [Mount token-based drive after boot](#mount-token-based-drive-after-boot)
+
 Use a `dev` variable in the examples below. Set the luks2 root device as the value of the variable before running these.
 
 ```bash
@@ -10,7 +19,7 @@ dev="/dev/nvmen0p1"
 
 ## Stock Debian/Ubuntu GPG key file
 
-This is the Debian-managed stock GPG key-file workflow: the encrypted key stays on disk and is decrypted in initramfs with the system's `decrypt_gnupg-sc` keyscript. The gpg-cryptenroll utility from this package can assist with setup.
+This is the Debian-managed stock GPG key-file workflow: the encrypted key stays on disk and is decrypted in initramfs with the system's `decrypt_gnupg-sc` keyscript. The gpg-cryptenroll utility from this package can assist with setup but everything else is handled by other packages.  Check those if you have issues.
 
 ### enroll
 
@@ -57,12 +66,17 @@ sudo update-initramfs -u -k "$(uname -r)"
 # Install the workflow stack if needed
 sudo apt install gnupg scdaemon pcscd
 
+# Ensure your smartcard public key is present in your user keyring.
+# The initramfs hook exports from that keyring and imports into initramfs GNUPGHOME.
+gpg --list-keys <recipient-or-fingerprint>
+
+# Optional: override keyring source for initramfs hook in /etc/luks-root-smartcard/initramfs.conf
+# SMARTCARD_GPG_SOURCE_HOME=/home/<user>/.gnupg
+# SMARTCARD_GPG_SOURCE_USER=<user>
+
 # Find your root mapping details
 # Enroll a GPG-encrypted key and store it as a LUKS2 token
 sudo gpg-cryptenroll token:auto "$dev" --recipient auto --keyslot auto
-
-# Export your public key for the initramfs
-gpg --export <recipient> >/etc/cryptsetup-initramfs/pubring.gpg
 
 # Recommended: set crypttab field 3 to none for token mode
 # (edit /etc/crypttab so the line reads: <name> UUID=<uuid> none luks)

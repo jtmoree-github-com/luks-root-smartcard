@@ -29,6 +29,13 @@ esac
 SMARTCARD_INITRAMFS_INCLUDE="${SMARTCARD_INITRAMFS_INCLUDE:-all}"
 [ -r /etc/luks-root-smartcard/initramfs.conf ] && . /etc/luks-root-smartcard/initramfs.conf
 
+# Public-key source for gpg-token workflow imports:
+#   SMARTCARD_GPG_SOURCE_HOME=/path/to/.gnupg   (preferred explicit override)
+#   SMARTCARD_GPG_SOURCE_USER=<username>        (resolved to /home/.../.gnupg)
+# Default is the invoking sudo user when available.
+SMARTCARD_GPG_SOURCE_HOME="${SMARTCARD_GPG_SOURCE_HOME:-}"
+SMARTCARD_GPG_SOURCE_USER="${SMARTCARD_GPG_SOURCE_USER:-${SUDO_USER:-}}"
+
 # Token-driven activation: for each crypttab entry, resolve the backing device
 # and scan its LUKS2 header for a gpg-token token. If found, include assets.
 # If a device cannot be resolved at build time, include assets conservatively.
@@ -54,6 +61,57 @@ _has_root_gpg_token() {
         _hi=$(( _hi + 1 ))
     done
     return 1
+}
+
+_resolve_gpg_source_homedir() {
+    if [ -n "$SMARTCARD_GPG_SOURCE_HOME" ]; then
+        printf '%s\n' "$SMARTCARD_GPG_SOURCE_HOME"
+        return 0
+    fi
+    if [ -n "$SMARTCARD_GPG_SOURCE_USER" ]; then
+        _src_home="$(getent passwd "$SMARTCARD_GPG_SOURCE_USER" 2>/dev/null | cut -d: -f6)"
+        if [ -n "$_src_home" ]; then
+            printf '%s\n' "$_src_home/.gnupg"
+            return 0
+        fi
+    fi
+    if [ -n "${HOME:-}" ]; then
+        printf '%s\n' "$HOME/.gnupg"
+        return 0
+    fi
+    return 1
+}
+
+_import_user_keyring_pubkeys_into_initramfs() {
+    _dest_home="$1"
+    _source_home="$(_resolve_gpg_source_homedir || true)"
+    if [ -z "$_source_home" ] || [ ! -d "$_source_home" ]; then
+        echo "WARNING: no usable GPG source keyring found for gpg-token import (SMARTCARD_GPG_SOURCE_HOME/SMARTCARD_GPG_SOURCE_USER)" >&2
+        return 1
+    fi
+
+    _tmp_export="$(mktemp /tmp/smartcard-gpg-export.XXXXXX)"
+    if ! /usr/bin/gpg --no-options --batch --no-tty --homedir "$_source_home" --export >"$_tmp_export" 2>/dev/null; then
+        rm -f "$_tmp_export"
+        echo "WARNING: failed exporting public keys from source keyring: $_source_home" >&2
+        return 1
+    fi
+    if [ ! -s "$_tmp_export" ]; then
+        rm -f "$_tmp_export"
+        echo "WARNING: source keyring has no exportable public keys: $_source_home" >&2
+        return 1
+    fi
+
+    if ! /usr/bin/gpg --no-options --no-autostart --trust-model=always \
+        --quiet --batch --no-tty --logger-file=/dev/null \
+        --homedir="$_dest_home" --import <"$_tmp_export"; then
+        rm -f "$_tmp_export"
+        echo "WARNING: failed importing source keyring pubkeys into initramfs GNUPGHOME" >&2
+        return 1
+    fi
+
+    rm -f "$_tmp_export"
+    return 0
 }
 
 _using_gpg_token=false
@@ -153,13 +211,12 @@ done
 
 [ -d "$DESTDIR/cryptroot/gnupghome" ] || mkdir -pm0700 "$DESTDIR/cryptroot/gnupghome"
 
-PUBRING="/etc/cryptsetup-initramfs/pubring.gpg"
-if [ -f "$PUBRING" ]; then
-    /usr/bin/gpg --no-options --no-autostart --trust-model=always \
-        --quiet --batch --no-tty --logger-file=/dev/null \
-        --homedir="$DESTDIR/cryptroot/gnupghome" --import <"$PUBRING"
-    find "$DESTDIR/cryptroot" -name "*~" -type f -delete
+if [ "$_using_gpg_token" = true ]; then
+    if ! _import_user_keyring_pubkeys_into_initramfs "$DESTDIR/cryptroot/gnupghome"; then
+        RV=1
+    fi
 fi
+find "$DESTDIR/cryptroot" -name "*~" -type f -delete
 
 pinentry=""
 if [ -x "/usr/bin/pinentry-curses" ]; then
