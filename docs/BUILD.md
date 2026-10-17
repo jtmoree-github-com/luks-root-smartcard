@@ -11,7 +11,7 @@ cd luks-root-smartcard
 ./scripts/build-deb.sh
 ```
 
-This produces the Debian package in the parent directory.
+By default this produces the Debian package in the parent directory.
 
 To bump the patch version before building:
 
@@ -76,12 +76,15 @@ cat > ~/.config/luks-root-smartcard/ppa.env <<'EOF'
 LUKS_PPA_OWNER=jtmoree
 LUKS_PPA_NAME=security-tools
 LUKS_DEBSIGN_KEYID=<your-gpg-keyid-or-fingerprint>
+LUKS_BUILD_OUTPUT_DIR=<absolute-path-for-build-artifacts>
 LUKS_LTS_SERIES=resolute
 LUKS_LTS_SERIES_NUM=26.04
 EOF
 ```
 
 For smart-card backed keys, set `LUKS_DEBSIGN_KEYID` to the full fingerprint of the card key you use for signing. This avoids email/UID auto-selection issues when the changelog maintainer address differs from the key UID.
+
+Set `LUKS_BUILD_OUTPUT_DIR` when you want `.deb`, `.dsc`, `.changes`, and related artifacts copied into a specific directory instead of remaining in the repository parent directory.
 
 After that, `--ppa-owner` and `--ppa-name` become optional:
 
@@ -161,6 +164,6 @@ echo test | gpg --local-user <full-key-fingerprint> --clearsign >/tmp/gpg-sign-t
 
 ## Notes
 
-- The package is produced in the parent directory of the repository.
+- Build artifacts are produced in the parent directory by default, or moved to `LUKS_BUILD_OUTPUT_DIR` when set in `~/.config/luks-root-smartcard/ppa.env`.
 - Use the release helper when you want to prepare PPA-ready source packages for a target Ubuntu series.
 - The build scripts are the operational interface for both local builds and release packaging.

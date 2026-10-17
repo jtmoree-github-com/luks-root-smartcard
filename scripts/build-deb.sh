@@ -3,11 +3,28 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/luks-root-smartcard/ppa.env"
+DEFAULT_OUTPUT_DIR="$(dirname "$PROJECT_ROOT")"
+BUILD_OUTPUT_DIR="${LUKS_BUILD_OUTPUT_DIR:-}"
 
 cd "$PROJECT_ROOT"
 
 BUMP_MODE=""
 BUILD_MODE="binary"
+
+if [ -r "$CONFIG_FILE" ]; then
+	set +u
+	# shellcheck disable=SC1090
+	. "$CONFIG_FILE"
+	set -u
+	BUILD_OUTPUT_DIR="${BUILD_OUTPUT_DIR:-${LUKS_BUILD_OUTPUT_DIR:-}}"
+fi
+
+if [ -z "$BUILD_OUTPUT_DIR" ]; then
+	BUILD_OUTPUT_DIR="$DEFAULT_OUTPUT_DIR"
+fi
+
+mkdir -p "$BUILD_OUTPUT_DIR"
 
 for arg in "$@"; do
 	case "$arg" in
@@ -74,4 +91,25 @@ else
 fi
 
 echo "[2/2] Artifacts"
-ls -1 "$(dirname "$PROJECT_ROOT")"/luks-root-smartcard-tools_* || true
+SRC_NAME="$(dpkg-parsechangelog -S Source)"
+CUR_VERSION="$(dpkg-parsechangelog -S Version)"
+CHANGES_FILE="${DEFAULT_OUTPUT_DIR}/${SRC_NAME}_${CUR_VERSION}_$(dpkg-architecture -qDEB_BUILD_ARCH).changes"
+
+if [ "$BUILD_OUTPUT_DIR" != "$DEFAULT_OUTPUT_DIR" ]; then
+	if [ -f "$CHANGES_FILE" ]; then
+		while read -r file_name; do
+			[ -n "$file_name" ] || continue
+			if [ -f "${DEFAULT_OUTPUT_DIR}/${file_name}" ]; then
+				mv -f "${DEFAULT_OUTPUT_DIR}/${file_name}" "${BUILD_OUTPUT_DIR}/"
+			fi
+		done < <(awk '/^Files:/ {in_files=1; next} in_files && NF==5 {print $5} in_files && NF!=5 {exit}' "$CHANGES_FILE")
+		mv -f "$CHANGES_FILE" "${BUILD_OUTPUT_DIR}/"
+	else
+		for artifact in "${DEFAULT_OUTPUT_DIR}"/*_"${CUR_VERSION}"_*; do
+			[ -e "$artifact" ] || continue
+			mv -f "$artifact" "${BUILD_OUTPUT_DIR}/"
+		done
+	fi
+fi
+
+ls -1 "${BUILD_OUTPUT_DIR}"/luks-root-smartcard-tools_* || true

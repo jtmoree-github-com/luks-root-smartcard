@@ -79,6 +79,7 @@ PPA owner, PPA name, and signing key can be stored in:
 LUKS_PPA_OWNER=jtmoree
 LUKS_PPA_NAME=<ppa-name>
 LUKS_DEBSIGN_KEYID=<keyid-or-fingerprint>
+LUKS_BUILD_OUTPUT_DIR=<absolute-path-for-build-artifacts>
 ```
 
 ## User Preferences

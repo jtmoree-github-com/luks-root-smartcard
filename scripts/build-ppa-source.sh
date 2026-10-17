@@ -6,12 +6,14 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 CL="$PROJECT_ROOT/debian/changelog"
 CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/luks-root-smartcard/ppa.env"
 DEVSCRIPTS_FILE="$HOME/.devscripts"
+DEFAULT_OUTPUT_DIR="$(dirname "$PROJECT_ROOT")"
 
 SERIES=""
 PPA_REV="1"
 PPA_OWNER="${LUKS_PPA_OWNER:-${LP_PPA_OWNER:-}}"
 PPA_NAME="${LUKS_PPA_NAME:-${LP_PPA_NAME:-}}"
 SIGN_KEY="${LUKS_DEBSIGN_KEYID:-${DEBSIGN_KEYID:-}}"
+BUILD_OUTPUT_DIR="${LUKS_BUILD_OUTPUT_DIR:-}"
 LTS_SERIES="${LUKS_LTS_SERIES:-resolute}"
 LTS_SERIES_NUM="${LUKS_LTS_SERIES_NUM:-26.04}"
 UBUNTU_SERIES_NUM=""
@@ -47,6 +49,7 @@ Default config file:
     LUKS_PPA_NAME=<ppa-name>
     LUKS_DEBSIGN_KEYID=<keyid-or-fingerprint>
     LUKS_GNUPGHOME=<path-to-gnupg-home>
+    LUKS_BUILD_OUTPUT_DIR=<where-built-artifacts-are-stored>
     LUKS_LTS_SERIES=resolute
     LUKS_LTS_SERIES_NUM=26.04
 
@@ -69,6 +72,7 @@ if [ -r "$CONFIG_FILE" ]; then
   PPA_OWNER="${PPA_OWNER:-${LUKS_PPA_OWNER:-${LP_PPA_OWNER:-}}}"
   PPA_NAME="${PPA_NAME:-${LUKS_PPA_NAME:-${LP_PPA_NAME:-}}}"
   SIGN_KEY="${SIGN_KEY:-${LUKS_DEBSIGN_KEYID:-${DEBSIGN_KEYID:-}}}"
+  BUILD_OUTPUT_DIR="${BUILD_OUTPUT_DIR:-${LUKS_BUILD_OUTPUT_DIR:-}}"
   LTS_SERIES="${LTS_SERIES:-${LUKS_LTS_SERIES:-resolute}}"
   LTS_SERIES_NUM="${LTS_SERIES_NUM:-${LUKS_LTS_SERIES_NUM:-26.04}}"
 fi
@@ -166,6 +170,12 @@ if ! [[ "$PPA_REV" =~ ^[0-9]+$ ]]; then
   exit 2
 fi
 
+if [ -z "$BUILD_OUTPUT_DIR" ]; then
+  BUILD_OUTPUT_DIR="$DEFAULT_OUTPUT_DIR"
+fi
+
+mkdir -p "$BUILD_OUTPUT_DIR"
+
 cd "$PROJECT_ROOT"
 
 TOP_LINE="$(head -1 "$CL")"
@@ -203,9 +213,24 @@ else
 fi
 
 echo "[2/2] Artifacts"
-ls -1 "$(dirname "$PROJECT_ROOT")"/"${SRC_NAME}"_* || true
+CHANGES_FILE="${DEFAULT_OUTPUT_DIR}/${SRC_NAME}_${NEW_VERSION}_source.changes"
 
-CHANGES_FILE="$(dirname "$PROJECT_ROOT")/${SRC_NAME}_${NEW_VERSION}_source.changes"
+if [ "$BUILD_OUTPUT_DIR" != "$DEFAULT_OUTPUT_DIR" ]; then
+  ORIG_CHANGES_FILE="$CHANGES_FILE"
+  if [ -f "$ORIG_CHANGES_FILE" ]; then
+    while read -r file_name; do
+      [ -n "$file_name" ] || continue
+      if [ -f "${DEFAULT_OUTPUT_DIR}/${file_name}" ]; then
+        mv -f "${DEFAULT_OUTPUT_DIR}/${file_name}" "${BUILD_OUTPUT_DIR}/"
+      fi
+    done < <(awk '/^Files:/ {in_files=1; next} in_files && NF==5 {print $5} in_files && NF!=5 {exit}' "$ORIG_CHANGES_FILE")
+    mv -f "$ORIG_CHANGES_FILE" "${BUILD_OUTPUT_DIR}/"
+  fi
+  CHANGES_FILE="${BUILD_OUTPUT_DIR}/${SRC_NAME}_${NEW_VERSION}_source.changes"
+fi
+
+ls -1 "${BUILD_OUTPUT_DIR}/${SRC_NAME}"_* || true
+
 if [ -f "$CHANGES_FILE" ]; then
   echo
   echo "Source changes file: $CHANGES_FILE"
