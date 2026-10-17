@@ -28,10 +28,27 @@ for _dbg_tok in $(cat /proc/cmdline 2>/dev/null); do
   esac
 done
 
-msg() { echo "smartcard-root-tpm2: $*" >&2; }
+log_kmsg() {
+  [ -w /dev/kmsg ] || return 0
+  printf '<6>smartcard-root-tpm2: %s\n' "$*" >/dev/kmsg 2>/dev/null || true
+}
+msg() {
+  echo "smartcard-root-tpm2: $*" >&2
+  log_kmsg "$*"
+}
 dbg() {
   [ "$DEBUG_ENABLED" = "1" ] || return 0
   echo "smartcard-root-tpm2: DEBUG: $*" >&2
+  log_kmsg "DEBUG: $*"
+}
+dbg_log_file_lines() {
+  [ "$DEBUG_ENABLED" = "1" ] || return 0
+  _prefix="$1"
+  _file="$2"
+  [ -r "$_file" ] || return 0
+  while IFS= read -r _line || [ -n "$_line" ]; do
+    dbg "${_prefix}${_line}"
+  done <"$_file"
 }
 DEBUG_SUMMARY_RESULT="fallback"
 DEBUG_SUMMARY_REASON="unclassified"
@@ -186,9 +203,7 @@ if cryptsetup luksOpen \
   exit 0
 fi
 dbg "cryptsetup luksOpen failed via TPM2 token"
-if [ "$DEBUG_ENABLED" = "1" ]; then
-  sed 's/^/smartcard-root-tpm2: DEBUG: cryptsetup: /' "$_tpm2_open_log" >&2 2>/dev/null || true
-fi
+dbg_log_file_lines "cryptsetup: " "$_tpm2_open_log"
 rm -f "$_tpm2_open_log"
 
 msg "TPM2 unlock failed; continuing to standard cryptroot fallback"

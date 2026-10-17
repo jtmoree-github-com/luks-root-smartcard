@@ -28,10 +28,27 @@ for _dbg_tok in $(cat /proc/cmdline 2>/dev/null); do
   esac
 done
 
-msg() { echo "smartcard-root-fido2: $*" >&2; }
+log_kmsg() {
+  [ -w /dev/kmsg ] || return 0
+  printf '<6>smartcard-root-fido2: %s\n' "$*" >/dev/kmsg 2>/dev/null || true
+}
+msg() {
+  echo "smartcard-root-fido2: $*" >&2
+  log_kmsg "$*"
+}
 dbg() {
   [ "$DEBUG_ENABLED" = "1" ] || return 0
   echo "smartcard-root-fido2: DEBUG: $*" >&2
+  log_kmsg "DEBUG: $*"
+}
+dbg_log_file_lines() {
+  [ "$DEBUG_ENABLED" = "1" ] || return 0
+  _prefix="$1"
+  _file="$2"
+  [ -r "$_file" ] || return 0
+  while IFS= read -r _line || [ -n "$_line" ]; do
+    dbg "${_prefix}${_line}"
+  done <"$_file"
 }
 DEBUG_SUMMARY_RESULT="fallback"
 DEBUG_SUMMARY_REASON="unclassified"
@@ -62,6 +79,18 @@ prepare_prompt_console() {
     exec </dev/console >/dev/console 2>/dev/console
   fi
   export TERM=linux
+}
+
+announce_fido2_pin_prompt() {
+  _pin_notice="FIDO2 unlock: enter token PIN now (then touch token if requested)"
+  dbg "$_pin_notice"
+  if [ -w /dev/tty1 ]; then
+    printf '\n%s\n' "$_pin_notice" >/dev/tty1 2>/dev/null || true
+  elif [ -w /dev/console ]; then
+    printf '\n%s\n' "$_pin_notice" >/dev/console 2>/dev/null || true
+  else
+    msg "$_pin_notice"
+  fi
 }
 
 get_root_mapper_name() {
@@ -260,6 +289,7 @@ fi
 # Dismiss the boot splash before the plugin's PIN prompt on the happy path too.
 prepare_prompt_console
 while true; do
+  announce_fido2_pin_prompt
   _fido2_open_log="$(mktemp /run/smartcard-fido2-open.XXXXXX)"
   if cryptsetup luksOpen \
       --token-only \
@@ -273,9 +303,7 @@ while true; do
     exit 0
   fi
   dbg "cryptsetup luksOpen failed via FIDO2 token"
-  if [ "$DEBUG_ENABLED" = "1" ]; then
-    sed 's/^/smartcard-root-fido2: DEBUG: cryptsetup: /' "$_fido2_open_log" >&2 2>/dev/null || true
-  fi
+  dbg_log_file_lines "cryptsetup: " "$_fido2_open_log"
   rm -f "$_fido2_open_log"
 
   msg "FIDO2 unlock failed"

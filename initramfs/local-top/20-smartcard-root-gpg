@@ -443,9 +443,7 @@ start_pcscd() {
   /usr/sbin/pcscd --foreground --disable-polkit 2>/run/pcscd-stderr.log &
   echo $! >/run/pcscd.pid
   dbg "pcscd-start attempt=${PCSCD_START_COUNT}: started pid=$(cat /run/pcscd.pid 2>/dev/null || echo unknown)"
-  if [ "$DEBUG_ENABLED" = "1" ] && [ -f /run/pcscd-stderr.log ]; then
-    sed 's/^/smartcard-root-gpg: DEBUG: pcscd: /' /run/pcscd-stderr.log >&2 2>/dev/null || true
-  fi
+  dbg_log_file_lines "pcscd: " /run/pcscd-stderr.log
   _w=0
   while [ "$_w" -lt 3 ]; do
     sleep 1; _w=$(( _w + 1 ))
@@ -528,9 +526,7 @@ while true; do
       dbg "cryptsetup luksOpen succeeded via GPG token"
     else
       dbg "cryptsetup luksOpen failed after successful GPG token decrypt"
-      if [ "$DEBUG_ENABLED" = "1" ]; then
-        sed 's/^/smartcard-root-gpg: DEBUG: cryptsetup: /' "$_gpg_open_log" >&2 2>/dev/null || true
-      fi
+      dbg_log_file_lines "cryptsetup: " "$_gpg_open_log"
     fi
     rm -f "$_gpg_open_log"
   else

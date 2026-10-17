@@ -28,10 +28,27 @@ for _dbg_tok in $(cat /proc/cmdline 2>/dev/null); do
   esac
 done
 
-msg() { echo "smartcard-root-pkcs11: $*" >&2; }
+log_kmsg() {
+  [ -w /dev/kmsg ] || return 0
+  printf '<6>smartcard-root-pkcs11: %s\n' "$*" >/dev/kmsg 2>/dev/null || true
+}
+msg() {
+  echo "smartcard-root-pkcs11: $*" >&2
+  log_kmsg "$*"
+}
 dbg() {
   [ "$DEBUG_ENABLED" = "1" ] || return 0
   echo "smartcard-root-pkcs11: DEBUG: $*" >&2
+  log_kmsg "DEBUG: $*"
+}
+dbg_log_file_lines() {
+  [ "$DEBUG_ENABLED" = "1" ] || return 0
+  _prefix="$1"
+  _file="$2"
+  [ -r "$_file" ] || return 0
+  while IFS= read -r _line || [ -n "$_line" ]; do
+    dbg "${_prefix}${_line}"
+  done <"$_file"
 }
 DEBUG_SUMMARY_RESULT="fallback"
 DEBUG_SUMMARY_REASON="unclassified"
@@ -274,16 +291,12 @@ check_smartcard() {
   if command -v pkcs11-tool >/dev/null 2>&1; then
     _slot_log="$(mktemp /run/smartcard-pkcs11-slots.XXXXXX)"
     if pkcs11-tool --list-token-slots >"$_slot_log" 2>&1; then
-      if [ "$DEBUG_ENABLED" = "1" ]; then
-        sed 's/^/smartcard-root-pkcs11: DEBUG: slot: /' "$_slot_log" >&2 2>/dev/null || true
-      fi
+      dbg_log_file_lines "slot: " "$_slot_log"
       rm -f "$_slot_log"
       return 0
     fi
     dbg "pkcs11-tool --list-token-slots reported no token-present slot"
-    if [ "$DEBUG_ENABLED" = "1" ]; then
-      sed 's/^/smartcard-root-pkcs11: DEBUG: slot: /' "$_slot_log" >&2 2>/dev/null || true
-    fi
+    dbg_log_file_lines "slot: " "$_slot_log"
     rm -f "$_slot_log"
   else
     dbg "pkcs11-tool not present in initramfs environment"
@@ -466,9 +479,7 @@ while true; do
         decrypt_ok_but_open_failed=true
         msg "cryptsetup luksOpen failed after PKCS#11 decrypt using $KEY_SPEC"
         dbg "cryptsetup luksOpen failed after successful PKCS#11 decrypt for $KEY_SPEC"
-        if [ "$DEBUG_ENABLED" = "1" ]; then
-          sed 's/^/smartcard-root-pkcs11: DEBUG: cryptsetup: /' "$_pkcs11_open_log" >&2 2>/dev/null || true
-        fi
+        dbg_log_file_lines "cryptsetup: " "$_pkcs11_open_log"
       fi
       rm -f "$_pkcs11_open_log"
       rm -f "$TMP_B64"

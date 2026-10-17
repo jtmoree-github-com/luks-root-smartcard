@@ -61,6 +61,7 @@ See the [FIDO2 example](EXAMPLES.md#fido2).
 
 - FIDO2 device present and accessible in initramfs
 - `cryptsetup` token plugin support available for `systemd-fido2`
+- Boot script prints an explicit hint before unlock: enter FIDO2 PIN (prompt may be hidden), then touch the token for presence confirmation
 
 ### GPG token workflow
 
@@ -157,6 +158,16 @@ Debug logs for all initramfs workflows can be turned on/off at boot time with ke
   - `smartcard-root.debug=0`
   - `rd.debug=0`
 
+To enable debug persistently in GRUB, append the flags to `GRUB_CMDLINE_LINUX_DEFAULT` in `/etc/default/grub`, then regenerate the GRUB config:
+
+```bash
+sudo sed -i 's/^\(GRUB_CMDLINE_LINUX_DEFAULT="[^"]*\)"/\1 smartcard-root.debug=1 rd.debug=1"/' /etc/default/grub
+sudo update-grub
+```
+
+For a one-time debug boot, press `e` in the GRUB menu, append
+`smartcard-root.debug=1 rd.debug=1` to the `linux` line, then boot with `Ctrl+x`.
+
 When both enable and disable flags are present, the last one on the kernel command line wins.
 
 With debug enabled, workflows emit additional traces for:
@@ -174,12 +185,10 @@ Summary format:
 smartcard-root-<workflow>: DEBUG: summary result=<success|fallback|skip> reason=<reason-code> mapper=<name|unset> device=<path|unset>
 ```
 
-For the GPG root-unlock workflow, debug lines are also mirrored into the kernel
-log (`/dev/kmsg`) so you can retrieve full boot history after login even when
-the initramfs console scrollback is limited:
+Debug lines are also mirrored into the kernel log (`/dev/kmsg`) so you can retrieve full boot history after login even when the initramfs console scrollback is limited:
 
 ```bash
-journalctl -k -b | grep 'smartcard-root-gpg'
+journalctl -k -b | grep -E 'smartcard-root-(gpg|fido2|tpm2|pkcs11)'
 ```
 
 ## Initramfs asset inclusion
