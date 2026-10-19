@@ -51,13 +51,20 @@ echo "=== Step 2: Enroll smartcard via systemd-cryptenroll ==="
 
 # Find the encryption key URI on the token.
 # systemd-cryptenroll rejects token-level URIs when they match multiple public keys.
-PKCS11_URI="$(pkcs11-tool --list-objects --slot 0 2>/dev/null \
+_pkcs11_pubkeys="$(pkcs11-tool --list-objects --type pubkey 2>/dev/null || true)"
+PKCS11_URI="$(printf '%s\n' "$_pkcs11_pubkeys" \
     | awk '
         /^Public Key Object/ { in_pubkey = 1; label = ""; next }
-        in_pubkey && /^  label: *Encryption key$/ { label = 1 }
-        in_pubkey && /^  uri: *pkcs11:/ {
-            if (label) {
-                sub(/^  uri: */, "")
+        in_pubkey && $1 == "label:" {
+            $1 = ""
+            sub(/^ +/, "")
+            label = tolower($0)
+            next
+        }
+        in_pubkey && $1 == "uri:" {
+            $1 = ""
+            sub(/^ +/, "")
+            if (label == "encryption key") {
                 print
                 exit
             }
@@ -65,18 +72,27 @@ PKCS11_URI="$(pkcs11-tool --list-objects --slot 0 2>/dev/null \
         in_pubkey && NF == 0 { in_pubkey = 0 }
     ' )"
 if [ -z "$PKCS11_URI" ]; then
-    PKCS11_URI="$(pkcs11-tool --list-objects --slot 0 2>/dev/null \
+    PKCS11_URI="$(printf '%s\n' "$_pkcs11_pubkeys" \
         | awk '
             /^Public Key Object/ { in_pubkey = 1; next }
-            in_pubkey && /^  uri: *pkcs11:/ {
-                sub(/^  uri: */, "")
+            in_pubkey && $1 == "uri:" {
+                $1 = ""
+                sub(/^ +/, "")
                 print
                 exit
             }
             in_pubkey && NF == 0 { in_pubkey = 0 }
         ' )"
 fi
-[ -n "$PKCS11_URI" ] || die "cannot determine PKCS#11 public key URI"
+if [ -z "$PKCS11_URI" ]; then
+    echo "pkcs11-tool public-key listing was:" >&2
+    if [ -n "$_pkcs11_pubkeys" ]; then
+        printf '%s\n' "$_pkcs11_pubkeys" >&2
+    else
+        echo "(no output from pkcs11-tool --list-objects --type pubkey)" >&2
+    fi
+    die "cannot determine PKCS#11 public key URI"
+fi
 ok "using token URI: $PKCS11_URI"
 
 echo ">>> You will be prompted for the LUKS passphrase (enter: $PASSPHRASE) <<<"
