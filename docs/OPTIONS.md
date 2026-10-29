@@ -6,7 +6,7 @@ The key security principles are the same across firmware types.  Often hardware 
 
 If booting multiple systems it will limit options.  Booting MS Windows severely limits our options.
 
-## Attack vectors:
+## Risks:
 
 1. Unauthorized changes to BIOS/UEFI boot settings, firmware tampering
 2. Booting from removable media to read/alter system and data
@@ -24,10 +24,10 @@ If booting multiple systems it will limit options.  Booting MS Windows severely 
 | --- | --- | --- |
 | a. Password on firmware/admin access | 1 | 2,3,4,5,6,7,8 |
 | b. Disable boot methods | 2 | 3,4,5,6,7,8 |
-| c. Use Full Disk Encryption^ | 2,3 | 4,7,8 |
+| c. Full Disk Encryption (all but EFI)^ | 2,3 | 4,7,8 |
 | d. Encrypt the boot partition | 4,5 | 3,4,5,7,8 |
 | e. Encrypt the root partition | 6 | 3,4,5,7,8 |
-| f. Use TPM hardware-backed unlock^ | 3,4,5,8 | 1,2,3,4,5,6,7 |
+| f. TPM hardware-backed unlock^ | 3,4,5,8 | 1,2,3,4,5,6,7 |
 | g. Keep a tested recovery path | 7 | 1,2,3,4,5,6,8 |
 | h. Secure Boot | 4 | 1,2,3,5,6,7,8 |
 | i. Secured backups | 9 | 1,2,3,4,5,6,7,8 |
@@ -43,7 +43,7 @@ If we can use all of the principles it maximizes security.  We have protected ou
 
 This is likely our reality as almost no one has FDE+TPM working.  Most installers don't support it and those that do are often buggy to a fault.  When it does work it comes with tradeoffs such as multiple prompts on boot and lack of support for hardware such as tpm and smart cards.
 
-The ideal would be to use Unified Kernal Images with secure boot.  UKI is the combination of the Linux kernel and the initial ram disk in a single binary  signed and checked by Secure Boot.   If we use UKI we can be assured that our boot process is safe.  If we have that assurance we can trust the prompts during boot.  If we want to reduce the prompt fatigue there are other options such as using smartcards.  Note that since the boot material sits on the unencrypted EFI we must take care NOT to store the decryption materials inside the UKI as an attacker could gain access.
+The ideal would be to use Unified Kernal Images with secure boot.  UKI is the combination of the Linux kernel and the initial ram disk in a single binary  signed and checked by Secure Boot.   If we use UKI we can be assured that our boot process is safe.  If we have that assurance we can trust the prompts during boot.  If we want to reduce the prompt fatigue there are other options such as using smartcards.  Note that since the boot material sits on the unencrypted EFI we must take care NOT to store the decryption materials inside the UKI as an attacker with physical access could compromise the system.
 
 Since the TPM support on linux is lacking it is likely that we cannot use TPM to protect our boot but we don't need it with UKI. Unfortunately, UKI seems to be fragile.  I bricked the first system where I tried to enable it.
 
