@@ -181,8 +181,8 @@ sudo apt install systemd-cryptsetup
 # Enroll TPM2-based unlock against PCR 7
 sudo systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs=7 "$dev"
 
-# Recommended: set crypttab field 3 to none for token mode
-# (edit /etc/crypttab so the line reads: <name> UUID=<uuid> none luks)
+# Recommended: set crypttab for tpm mode
+# (edit /etc/crypttab so the line reads: <name> UUID=<uuid> none luks,discard)
 
 # Rebuild initramfs
 sudo update-initramfs -u -k "$(uname -r)"
@@ -196,6 +196,14 @@ sudo systemd-cryptenroll --wipe-slot=tpm2 "$dev"
 
 # Rebuild initramfs
 sudo update-initramfs -u -k "$(uname -r)"
+```
+
+### update
+
+This may be needed when the EFI drive is updated as it is part of the signatures stored in the tpm.
+
+```bash
+sudo systemd-cryptenroll $dev --wipe-slot=tpm2 --tpm2-device=auto --tpm2-pcrs=0+7
 ```
 
 ## Mount token-based drive after boot
