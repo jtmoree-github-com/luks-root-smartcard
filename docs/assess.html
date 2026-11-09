@@ -243,18 +243,18 @@
           <span class="value" id="implementedCount">0</span>
         </div>
         <div class="metric">
-          <span class="label">Not implemented</span>
-          <span class="value" id="notImplementedCount">0</span>
+          <span class="label">Residual exposure</span>
+          <span class="value" id="residualExposureCount">0</span>
         </div>
         <div class="metric">
-          <span class="label">Outstanding risks</span>
-          <span class="value" id="outstandingRiskCount">0</span>
-        </div>
-        <div class="metric">
-          <span class="label">Coverage</span>
+          <span class="label">Implementation coverage</span>
           <span class="value" id="coveragePercent">0%</span>
         </div>
       </section>
+
+      <p class="note">
+        Residual exposure is dependency-aware: a missing foundational control expands the set of risks that remain reachable.
+      </p>
 
       <section class="panel">
         <h2>Mitigations checklist</h2>
@@ -274,7 +274,7 @@
 
     <script>
       const RISKS = [
-        { id: '1', title: 'Unauthorized changes to BIOS/UEFI boot settings, firmware tampering' },
+        { id: '1', title: 'Unauthorized changes to BIOS/UEFI boot settings' },
         { id: '2', title: 'Booting from removable media to read/alter system and data' },
         { id: '3', title: 'Disk extraction' },
         { id: '4', title: 'Modifying a UEFI boot file' },
@@ -282,7 +282,9 @@
         { id: '6', title: 'Reading the filesystem without the boot chain' },
         { id: '7', title: 'Lockouts, failed unlocks, and loss of access during recovery or hardware failure' },
         { id: '8', title: 'Stolen passphrases and software-key theft' },
-        { id: '9', title: 'Access to recovery resources e.g. backups of secrets and keys' }
+        { id: '9', title: 'Access to recovery resources e.g. backups of secrets and keys' },
+        { id: '10', title: 'Theft of hardware to increase attack vectors' },
+        { id: '11', title: 'Hardware modification, firmware tampering' }
       ];
 
       const MITIGATIONS = [
@@ -290,71 +292,78 @@
           id: 'a',
           label: 'Password on firmware/admin access',
           protects: ['1'],
-          vulnerableTo: ['2', '3', '4', '5', '6', '7', '8'],
+          vulnerableTo: ['2', '3', '4', '5', '6', '7', '8', '10', '11'],
           note: 'Protects the firmware layer from direct tampering and unauthorized configuration changes.'
         },
         {
           id: 'b',
           label: 'Disable boot methods',
           protects: ['2'],
-          vulnerableTo: ['3', '4', '5', '6', '7', '8'],
+          vulnerableTo: ['3', '4', '5', '6', '7', '8', '10', '11'],
           note: 'Prevents booting from removable media or alternative paths that bypass safeguards.'
         },
         {
           id: 'c',
-          label: 'Use Full Disk Encryption',
-          protects: ['2', '3'],
-          vulnerableTo: ['4', '7', '8'],
-          note: 'Strong protection against physical disk theft or extraction, with caveats around real-world compatibility.'
+          label: 'Full Disk Encryption (all but EFI)',
+          protects: ['2', '3', '10'],
+          vulnerableTo: ['4', '7', '8', '11'],
+          note: 'Protects data from physical theft and extraction, while keeping the EFI outside the encrypted boundary.'
         },
         {
           id: 'd',
           label: 'Encrypt the boot partition',
-          protects: ['4', '5'],
-          vulnerableTo: ['3', '4', '5', '7', '8'],
-          note: 'Lowers the risk of tampering with the early boot environment.'
+          protects: ['4', '5', '10'],
+          vulnerableTo: ['3', '4', '5', '7', '8', '11'],
+          note: 'Lowers the risk of tampering with the early boot environment and external attack paths.'
         },
         {
           id: 'e',
           label: 'Encrypt the root partition',
-          protects: ['6'],
-          vulnerableTo: ['3', '4', '5', '7', '8'],
+          protects: ['6', '10'],
+          vulnerableTo: ['3', '4', '5', '7', '8', '11'],
           note: 'Protects the filesystem if an attacker reaches the OS without the boot chain.'
         },
         {
           id: 'f',
-          label: 'Use TPM hardware-backed unlock',
-          protects: ['3', '4', '5', '8'],
-          vulnerableTo: ['1', '2', '3', '4', '5', '6', '7'],
+          label: 'TPM hardware-backed unlock',
+          protects: ['3', '4', '5', '8', '10'],
+          vulnerableTo: ['1', '2', '3', '4', '5', '6', '7', '11'],
           note: 'Adds hardware-backed binding for unlock and early boot checks, but is not a complete replacement for good firmware hygiene.'
         },
         {
           id: 'g',
           label: 'Keep a tested recovery path',
           protects: ['7'],
-          vulnerableTo: ['1', '2', '3', '4', '5', '6', '8'],
+          vulnerableTo: ['1', '2', '3', '4', '5', '6', '8', '10', '11'],
           note: 'Prevents being locked out during recovery or hardware failure.'
         },
         {
           id: 'h',
           label: 'Secure Boot',
           protects: ['4'],
-          vulnerableTo: ['1', '2', '3', '5', '6', '7', '8'],
+          vulnerableTo: ['1', '2', '3', '5', '6', '7', '8', '10', '11'],
           note: 'Restricts boot trust to signed software and makes tampering more visible.'
         },
         {
           id: 'i',
           label: 'Secured backups',
-          protects: ['9'],
-          vulnerableTo: ['1', '2', '3', '4', '5', '6', '7', '8'],
+          protects: ['9', '10'],
+          vulnerableTo: ['1', '2', '3', '4', '5', '6', '7', '8', '11'],
           note: 'Protects keys, secrets, and recovery assets from theft or loss.'
         },
         {
           id: 'j',
           label: 'Unified Kernel Image (UKI)',
-          protects: ['3', '4', '5', '8'],
-          vulnerableTo: ['7'],
+          protects: ['3', '4', '5', '8', '10'],
+          vulnerableTo: ['7', '11'],
           note: 'Improves trust in the boot path with signed kernel and initramfs, but should be used carefully because it can be fragile.'
+        },
+        {
+          id: 'k',
+          label: 'Boot from Secure USB',
+          protects: ['2', '3', '4', '5', '6', '8'],
+          vulnerableTo: ['10', '11'],
+          note: 'Lets you move the trusted boot path off the host, but physical protection of the USB remains essential.'
         }
       ];
 
@@ -373,7 +382,7 @@
         row.innerHTML = `
           <div class="mitigation-body">
             <strong>${mitigation.id.toUpperCase()}. ${mitigation.label}</strong>
-            <div class="meta">Protects against: ${mitigation.protects.join(', ')} · Vulnerable to: ${mitigation.vulnerableTo.join(', ')}<br>${mitigation.note}</div>
+            <div class="meta">Mitigates: ${mitigation.protects.join(', ')} · Vulnerable to: ${mitigation.vulnerableTo.join(', ')}<br>${mitigation.note}</div>
           </div>
           <div class="options" aria-label="${mitigation.label} status">
             ${['implemented', 'not_implemented']
@@ -429,15 +438,13 @@
 
       function getMitigationStatusCounts() {
         let implemented = 0;
-        let notImplemented = 0;
 
         MITIGATIONS.forEach((mitigation) => {
           const status = getSelectedStatus(mitigation.id);
           if (status === 'implemented') implemented += 1;
-          else notImplemented += 1;
         });
 
-        return { implemented, notImplemented };
+        return { implemented };
       }
 
       function getRiskDetail(riskId) {
@@ -447,13 +454,21 @@
           '6': 'If the boot chain is not protected, the filesystem can be read without validation.',
           '7': 'Recovery needs a tested and trusted path or access can be lost during failure.',
           '8': 'A stolen passphrase or software key remains a risk if the device is not protected end-to-end.',
-          '9': 'Backups and recovery materials must be secured to prevent secret exposure.'
+          '9': 'Backups and recovery materials must be secured to prevent secret exposure.',
+          '10': 'Hardware theft or loss increases the chance that an attacker can exploit the system without the owner present.',
+          '11': 'Firmware or hardware tampering can bypass software protections and compromise trust at the lowest layer.'
         };
 
         return details[riskId] || 'This risk remains active until the mitigating controls are in place.';
       }
 
       function getRiskStatus(riskId) {
+        const protectsMitigations = MITIGATIONS.filter((mitigation) => mitigation.protects.includes(riskId));
+        const hasImplementedProtection = protectsMitigations.some((mitigation) => getSelectedStatus(mitigation.id) === 'implemented');
+
+        const vulnerableMitigations = MITIGATIONS.filter((mitigation) => mitigation.vulnerableTo.includes(riskId));
+        const unresolvedDependency = vulnerableMitigations.some((mitigation) => getSelectedStatus(mitigation.id) !== 'implemented');
+
         if (riskId === '5' && getSelectedStatus('d') !== 'implemented' && getSelectedStatus('j') !== 'implemented') {
           return 'exposed';
         }
@@ -462,44 +477,48 @@
           return 'exposed';
         }
 
-        const relatedMitigations = MITIGATIONS.filter((mitigation) => mitigation.protects.includes(riskId));
-        const statuses = relatedMitigations.map((mitigation) => getSelectedStatus(mitigation.id));
-
-        if (statuses.some((status) => status === 'implemented')) {
+        if (hasImplementedProtection && !unresolvedDependency) {
           return 'covered';
+        }
+
+        if (hasImplementedProtection && unresolvedDependency) {
+          return 'exposed';
         }
 
         return 'exposed';
       }
 
-      function riskCoveragePercent() {
-        const covered = RISKS.filter((risk) => getRiskStatus(risk.id) === 'covered').length;
-        return Math.round((covered / RISKS.length) * 100);
+      function implementationCoveragePercent() {
+        const { implemented } = getMitigationStatusCounts();
+        return Math.round((implemented / MITIGATIONS.length) * 100);
       }
 
       function getRecommendedActions() {
         const actions = [];
 
-        RISKS.forEach((risk) => {
-          if (getRiskStatus(risk.id) === 'covered') return;
+        const priorityRiskOrder = ['4', '5', '1', '2', '3', '6', '7', '8', '9', '10', '11'];
+
+        priorityRiskOrder.forEach((riskId) => {
+          const risk = RISKS.find((entry) => entry.id === riskId);
+          if (!risk || getRiskStatus(risk.id) === 'covered') return;
 
           const candidateMitigations = MITIGATIONS.filter((mitigation) => mitigation.protects.includes(risk.id) && getSelectedStatus(mitigation.id) !== 'implemented');
           const suggested = candidateMitigations.slice(0, 2).map((mitigation) => mitigation.label);
 
           if (risk.id === '5') {
-            actions.push(`Risk 5: ${risk.title}. Encrypt the boot partition and/or use a signed UKI, otherwise physical access can modify the boot process.`);
+            actions.push(`Encrypt the boot partition and/or use a signed UKI. Risk 5: ${risk.title}. Physical access can modify the boot process if this is not addressed.`);
             return;
           }
 
           if (risk.id === '4') {
-            actions.push(`Risk 4: ${risk.title}. Enable Secure Boot or trust a signed UKI so the boot path cannot be silently altered.`);
+            actions.push(`Enable Secure Boot or trust a signed UKI. Risk 4: ${risk.title}. The boot path can be silently altered without this control.`);
             return;
           }
 
           if (suggested.length === 0) {
-            actions.push(`Risk ${risk.id}: ${risk.title} remains partially unmanaged; document the residual risk and build a recovery plan.`);
+            actions.push(`Document the remaining residual risk and recovery plan. Risk ${risk.id}: ${risk.title}.`);
           } else {
-            actions.push(`Risk ${risk.id}: ${risk.title}. Prioritize: ${suggested.join(' and ')}.`);
+            actions.push(`${suggested.join(' and ')}. Risk ${risk.id}: ${risk.title}.`);
           }
         });
 
@@ -530,13 +549,12 @@
       }
 
       function updateSummary() {
-        const { implemented, notImplemented } = getMitigationStatusCounts();
-        const outstanding = RISKS.filter((risk) => getRiskStatus(risk.id) === 'exposed').length;
-        const percent = riskCoveragePercent();
+        const { implemented } = getMitigationStatusCounts();
+        const residualExposure = RISKS.filter((risk) => getRiskStatus(risk.id) === 'exposed').length;
+        const percent = implementationCoveragePercent();
 
         document.getElementById('implementedCount').textContent = String(implemented);
-        document.getElementById('notImplementedCount').textContent = String(notImplemented);
-        document.getElementById('outstandingRiskCount').textContent = String(outstanding);
+        document.getElementById('residualExposureCount').textContent = String(residualExposure);
         document.getElementById('coveragePercent').textContent = `${percent}%`;
       }
 
