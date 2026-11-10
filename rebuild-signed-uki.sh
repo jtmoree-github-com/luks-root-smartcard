@@ -5,6 +5,8 @@ KVER="${1:-$(uname -r)}"
 KEY="/root/secureboot-keys/MOK.key"
 CERT="/root/secureboot-keys/MOK.crt"
 CERT_DER="/root/secureboot-keys/MOK.cer"
+MOK_SUBJECT="/CN=UKI MOK/"
+MOK_DAYS="36500"
 BOOT_LABEL_PREFIX="UKI"
 BOOT_LABEL="${BOOT_LABEL_PREFIX} ${KVER}"
 EFI_DISK_OVERRIDE="${EFI_DISK_OVERRIDE:-}"
@@ -12,6 +14,49 @@ EFI_PART_OVERRIDE="${EFI_PART_OVERRIDE:-}"
 FILE_PREFIX="$(printf '%s' "$BOOT_LABEL_PREFIX" | tr '[:space:]' '-' | tr -cd '[:alnum:]_.-')"
 FILE_PREFIX="${FILE_PREFIX:-uki}"
 IMAGE_BASENAME="${FILE_PREFIX}-${KVER}"
+
+ensure_mok_files() {
+  # Ensure signing material exists before ukify/sbsign steps.
+  local key_dir
+  key_dir="$(dirname "$KEY")"
+  mkdir -p "$key_dir"
+  chmod 0700 "$key_dir"
+
+  if [ ! -f "$KEY" ] && [ ! -f "$CERT" ] && [ ! -f "$CERT_DER" ]; then
+    echo "MOK files not found; generating new signing keypair at ${key_dir}"
+    openssl req -new -x509 -newkey rsa:4096 -sha256 -nodes \
+      -subj "$MOK_SUBJECT" -days "$MOK_DAYS" \
+      -keyout "$KEY" -out "$CERT"
+  elif [ ! -f "$KEY" ] && { [ -f "$CERT" ] || [ -f "$CERT_DER" ]; }; then
+    echo "MOK private key not found; generating new keypair and replacing certificate files in ${key_dir}"
+    openssl req -new -x509 -newkey rsa:4096 -sha256 -nodes \
+      -subj "$MOK_SUBJECT" -days "$MOK_DAYS" \
+      -keyout "$KEY" -out "$CERT"
+  elif [ -f "$KEY" ] && [ ! -f "$CERT" ] && [ -f "$CERT_DER" ]; then
+    echo "MOK PEM certificate not found; converting from ${CERT_DER}"
+    openssl x509 -inform DER -in "$CERT_DER" -out "$CERT"
+  elif [ -f "$KEY" ] && [ ! -f "$CERT" ]; then
+    echo "MOK certificate not found; generating from existing private key"
+    openssl req -new -x509 -sha256 \
+      -subj "$MOK_SUBJECT" -days "$MOK_DAYS" \
+      -key "$KEY" -out "$CERT"
+  fi
+
+  if [ ! -f "$CERT_DER" ] || [ "$CERT" -nt "$CERT_DER" ]; then
+    echo "Generating DER certificate ${CERT_DER}"
+    openssl x509 -in "$CERT" -outform DER -out "$CERT_DER"
+  fi
+
+  chmod 0600 "$KEY"
+  chmod 0644 "$CERT" "$CERT_DER"
+
+  if ! openssl x509 -noout -modulus -in "$CERT" | cmp -s - <(openssl rsa -noout -modulus -in "$KEY" 2>/dev/null); then
+    echo "ERROR: MOK certificate and private key do not match (${CERT} vs ${KEY})" >&2
+    exit 1
+  fi
+}
+
+ensure_mok_files
 
 for p in /boot/efi /efi; do
   if findmnt -rn -T "$p" >/dev/null 2>&1 && [ -d "$p/EFI" ]; then
