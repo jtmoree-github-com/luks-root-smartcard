@@ -1,6 +1,6 @@
 ---
 name: update-ppa
-description: "Build and upload a PPA source package for luks-root-smartcard-tools. Use when: publishing to Launchpad PPA, releasing a new PPA version, building ppa source, uploading to ppa, bumping ppa version, targeting a new Ubuntu series for the PPA (resolute, questing, noble, jammy)."
+description: "Build and upload a PPA source package for luks-root-smartcard-tools. Use when: publishing to Launchpad PPA, releasing a new PPA version, building ppa source, uploading to ppa, bumping ppa version, targeting a new Ubuntu series for the PPA (stonking, resolute, questing, noble, jammy)."
 argument-hint: "<series> [--ppa-rev <n>]"
 ---
 
@@ -18,6 +18,7 @@ Builds a signed Launchpad PPA source package and prints the `dput` upload comman
 
 | Series | Version |
 |---|---|
+| `stonking` | 26.10 |
 | `resolute` / `lts` | 26.04 |
 | `questing` | 25.10 |
 | `noble` | 24.04 |
@@ -43,7 +44,7 @@ Ask the user whether the version should be bumped. Per user preference, **always
 ./scripts/build-ppa-source.sh --series <series> --ppa-rev <n>
 ```
 
-- `--series` is required. Choose from: `resolute`, `questing`, `noble`, `jammy`, `lts`
+- `--series` is required. Choose from: `stonking`, `resolute`, `questing`, `noble`, `jammy`, `lts`
 - `--ppa-rev` defaults to `1`; increment when re-uploading the same upstream version to the same series
 - The script rewrites the `debian/changelog` top line to `<version>~ppa<n>~ubuntu<XX.YY>.1` and builds a signed source package
 

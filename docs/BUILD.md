@@ -42,10 +42,10 @@ PPANAME=security-tools
 ./scripts/build-ppa-source.sh --series noble --ppa-owner "$PPAOWNER" --ppa-name "$PPANAME"
 ```
 
-For the current development series (questing), switch the series:
+For the current development series (stonking), switch the series:
 
 ```bash
-./scripts/build-ppa-source.sh --series questing --ppa-rev 1 --ppa-owner "$PPAOWNER" --ppa-name "$PPANAME"
+./scripts/build-ppa-source.sh --series stonking --ppa-rev 1 --ppa-owner "$PPAOWNER" --ppa-name "$PPANAME"
 ```
 
 For the current LTS, use `lts` (currently maps to resolute):

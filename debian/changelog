@@ -1,4 +1,4 @@
-luks-root-smartcard-tools (1.1.12) resolute; urgency=medium
+luks-root-smartcard-tools (1.1.13~ppa1~ubuntu26.10.1) stonking; urgency=medium
 
   * build packages in tmp
   * fix pkcs11 tests
