@@ -29,8 +29,8 @@ At boot, separate `local-top` scripts detect tokens in the LUKS2 header to activ
 
 ## Additional notes
 
-- Systemd is not available during boot on many systems but systemd luks2 tokens are well supported after boot.  This utility bridges the boot gap for initramfs without using systemd.
-- Not all systems have a TPM, and even when they do, systemd-tpm2 may require hardware features that are not available.  This utility expands the options for root decrypt.
+- Systemd is not available during boot on many systems but systemd luks2 tokens are well supported after boot.  This utility bridges the boot gap for initramfs without using systemd.   This utility DOES NOT enforce tpm register checks to verify that nothing has changed.  (maybe in the future).  The goal here is simply to decrypt the encrypted partition.
+- Not all systems have a TPM, and even when they do, systemd-tpm2 may require hardware features that are not available.  This utility expands the options for root decrypt using hardware instead of passphrases.
 - Multiple GPG workflows are supported including stock debian decrypt.  `gpg-cryptenroll` assists with setup.
 - LUKS version 1 is only compatible with the stock debian keyfile on disk.  Tokens used by the others are a LUKS 2 feature.
 
