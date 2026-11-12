@@ -8,12 +8,13 @@ CERT_DER="/root/secureboot-keys/MOK.cer"
 MOK_SUBJECT="/CN=UKI MOK/"
 MOK_DAYS="36500"
 BOOT_LABEL_PREFIX="UKI"
-BOOT_LABEL="${BOOT_LABEL_PREFIX} ${KVER}"
+BUILD_TAG="${BUILD_TAG:-$(date -u +%Y%m%dT%H%M%SZ)}"
+BOOT_LABEL="${BOOT_LABEL:-${BOOT_LABEL_PREFIX} ${KVER} ${BUILD_TAG}}"
 EFI_DISK_OVERRIDE="${EFI_DISK_OVERRIDE:-}"
 EFI_PART_OVERRIDE="${EFI_PART_OVERRIDE:-}"
 FILE_PREFIX="$(printf '%s' "$BOOT_LABEL_PREFIX" | tr '[:space:]' '-' | tr -cd '[:alnum:]_.-')"
 FILE_PREFIX="${FILE_PREFIX:-uki}"
-IMAGE_BASENAME="${FILE_PREFIX}-${KVER}"
+IMAGE_BASENAME="${FILE_PREFIX}-${KVER}-${BUILD_TAG}"
 
 ensure_mok_files() {
   # Ensure signing material exists before ukify/sbsign steps.
