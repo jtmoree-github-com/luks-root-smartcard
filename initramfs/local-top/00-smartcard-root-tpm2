@@ -28,6 +28,13 @@ for _dbg_tok in $(cat /proc/cmdline 2>/dev/null); do
   esac
 done
 
+# Check TPM2 sealed debug flag if cmdline didn't enable debug
+if [ "$DEBUG_ENABLED" = "0" ] && command -v tpm2_unseal >/dev/null 2>&1; then
+  if tpm2_unseal -c 0x81000001 >/dev/null 2>&1; then
+    DEBUG_ENABLED=1
+  fi
+fi
+
 log_kmsg() {
   [ -w /dev/kmsg ] || return 0
   printf '<6>smartcard-root-tpm2: %s\n' "$*" >/dev/kmsg 2>/dev/null || true

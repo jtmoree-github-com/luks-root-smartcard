@@ -16,6 +16,9 @@ depends() {
 install() {
     inst_simple /usr/share/luks-root-smartcard/smartcard-common-lib.sh
     
+    # Install TPM2 debug seal check (runs very early)
+    inst_hook pre-mount 00 "$moddir/smartcard-root-tpm2-debug.sh"
+    
     # Install common init scripts
     inst_hook pre-mount 01 "$moddir/smartcard-root-common.sh"
     inst_hook pre-mount 10 "$moddir/smartcard-root-token-detection.sh"
@@ -28,6 +31,12 @@ install() {
     
     # Install cleanup hooks
     inst_hook cleanup 99 "$moddir/smartcard-root-cleanup.sh"
+}
+
+installkernel() {
+    # TPM and HID modules for smartcard readers
+    hostonly="" instmods tpm tpm_tis tpm_tis_core tpm_crb
+    hostonly="" instmods hid hid_generic usbhid hidraw
 }
 
 installkernel() {
