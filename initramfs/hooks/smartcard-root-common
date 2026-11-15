@@ -22,10 +22,19 @@ esac
 
 . /usr/share/initramfs-tools/hook-functions
 
-for _realpath in /usr/bin/realpath /bin/realpath /usr/local/bin/realpath; do
-    if [ -x "$_realpath" ]; then
-        copy_exec "$_realpath"
-        break
+# Source shared libraries - try multiple paths for build-time flexibility
+_source_lib() {
+    if [ -f "/usr/share/luks-root-smartcard/$1" ]; then
+        . "/usr/share/luks-root-smartcard/$1"
+    elif [ -f "scripts/$1" ]; then
+        . "scripts/$1"
+    else
+        echo "ERROR: Cannot find $1" >&2
+        return 1
     fi
-done
+}
+
+_source_lib "smartcard-common-lib.sh"
+
+copy_exec "$(_find_binary_path /usr/bin/realpath /bin/realpath /usr/local/bin/realpath)" || true
 

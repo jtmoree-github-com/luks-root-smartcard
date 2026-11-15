@@ -21,13 +21,25 @@ esac
 
 . /usr/share/initramfs-tools/hook-functions
 
+# Source shared libraries - try multiple paths for build-time flexibility
+_source_lib() {
+    if [ -f "/usr/share/luks-root-smartcard/$1" ]; then
+        . "/usr/share/luks-root-smartcard/$1"
+    elif [ -f "scripts/$1" ]; then
+        . "scripts/$1"
+    else
+        echo "ERROR: Cannot find $1" >&2
+        return 1
+    fi
+}
+
+_source_lib "smartcard-common-lib.sh"
+
 # Asset inclusion mode, evaluated at initramfs generation time.
 #   all      - include this workflow's assets unconditionally (default)
 #   detected - include only when a matching token is in the root LUKS2 header
 # Override persistently via /etc/luks-root-smartcard/initramfs.conf, or per-run
 # via the SMARTCARD_INITRAMFS_INCLUDE environment variable.
-SMARTCARD_INITRAMFS_INCLUDE="${SMARTCARD_INITRAMFS_INCLUDE:-all}"
-[ -r /etc/luks-root-smartcard/initramfs.conf ] && . /etc/luks-root-smartcard/initramfs.conf
 
 # Public-key source for gpg-token workflow imports:
 #   SMARTCARD_GPG_SOURCE_HOME=/path/to/.gnupg   (preferred explicit override)
@@ -36,104 +48,9 @@ SMARTCARD_INITRAMFS_INCLUDE="${SMARTCARD_INITRAMFS_INCLUDE:-all}"
 SMARTCARD_GPG_SOURCE_HOME="${SMARTCARD_GPG_SOURCE_HOME:-}"
 SMARTCARD_GPG_SOURCE_USER="${SMARTCARD_GPG_SOURCE_USER:-${SUDO_USER:-}}"
 
-# Token-driven activation: for each crypttab entry, resolve the backing device
-# and scan its LUKS2 header for a gpg-token token. If found, include assets.
-# If a device cannot be resolved at build time, include assets conservatively.
+_load_inclusion_config "SMARTCARD_INITRAMFS_INCLUDE" "all"
 
-_resolve_dev_hook() {
-    case "$1" in
-        UUID=*)      blkid -U "${1#UUID=}" 2>/dev/null ;;
-        LABEL=*)     blkid -L "${1#LABEL=}" 2>/dev/null ;;
-        PARTUUID=*)  echo "/dev/disk/by-partuuid/${1#PARTUUID=}" ;;
-        PARTLABEL=*) echo "/dev/disk/by-partlabel/${1#PARTLABEL=}" ;;
-        *)           echo "$1" ;;
-    esac
-}
-
-_has_root_gpg_token() {
-    _hdev="$1"
-    _hi=0
-    while [ "$_hi" -lt 32 ]; do
-        _hjson="$(cryptsetup token export --token-id "$_hi" "$_hdev" 2>/dev/null || true)"
-        if [ -n "$_hjson" ] && printf '%s' "$_hjson" | grep -q '"type":"gpg-token"'; then
-            return 0
-        fi
-        _hi=$(( _hi + 1 ))
-    done
-    return 1
-}
-
-_resolve_gpg_source_homedir() {
-    if [ -n "$SMARTCARD_GPG_SOURCE_HOME" ]; then
-        printf '%s\n' "$SMARTCARD_GPG_SOURCE_HOME"
-        return 0
-    fi
-    if [ -n "$SMARTCARD_GPG_SOURCE_USER" ]; then
-        _src_home="$(getent passwd "$SMARTCARD_GPG_SOURCE_USER" 2>/dev/null | cut -d: -f6)"
-        if [ -n "$_src_home" ]; then
-            printf '%s\n' "$_src_home/.gnupg"
-            return 0
-        fi
-    fi
-    if [ -n "${HOME:-}" ]; then
-        printf '%s\n' "$HOME/.gnupg"
-        return 0
-    fi
-    return 1
-}
-
-_import_user_keyring_pubkeys_into_initramfs() {
-    _dest_home="$1"
-    _source_home="$(_resolve_gpg_source_homedir || true)"
-    if [ -z "$_source_home" ] || [ ! -d "$_source_home" ]; then
-        echo "WARNING: no usable GPG source keyring found for gpg-token import (SMARTCARD_GPG_SOURCE_HOME/SMARTCARD_GPG_SOURCE_USER)" >&2
-        return 1
-    fi
-
-    _tmp_export="$(mktemp /tmp/smartcard-gpg-export.XXXXXX)"
-    if ! /usr/bin/gpg --no-options --batch --no-tty --homedir "$_source_home" --export >"$_tmp_export" 2>/dev/null; then
-        rm -f "$_tmp_export"
-        echo "WARNING: failed exporting public keys from source keyring: $_source_home" >&2
-        return 1
-    fi
-    if [ ! -s "$_tmp_export" ]; then
-        rm -f "$_tmp_export"
-        echo "WARNING: source keyring has no exportable public keys: $_source_home" >&2
-        return 1
-    fi
-
-    if ! /usr/bin/gpg --no-options --no-autostart --trust-model=always \
-        --quiet --batch --no-tty --logger-file=/dev/null \
-        --homedir="$_dest_home" --import <"$_tmp_export"; then
-        rm -f "$_tmp_export"
-        echo "WARNING: failed importing source keyring pubkeys into initramfs GNUPGHOME" >&2
-        return 1
-    fi
-
-    rm -f "$_tmp_export"
-    return 0
-}
-
-_using_gpg_token=false
-_crypttab="${TABFILE:-/etc/crypttab}"
-if [ -f "$_crypttab" ]; then
-    while IFS= read -r _ctline; do
-        case "$_ctline" in ''|'#'*) continue ;; esac
-        set -- $_ctline
-        [ "$#" -ge 2 ] || continue
-        _hdev="$(_resolve_dev_hook "$2" 2>/dev/null || true)"
-        if [ -b "$_hdev" ]; then
-            if _has_root_gpg_token "$_hdev"; then
-                _using_gpg_token=true
-                break
-            fi
-        else
-            _using_gpg_token=true
-            break
-        fi
-    done < "$_crypttab"
-fi
-if [ "${SMARTCARD_INITRAMFS_INCLUDE:-all}" = "detected" ] && [ "$_using_gpg_token" = false ]; then
+if [ "${SMARTCARD_INITRAMFS_INCLUDE:-all}" = "detected" ] && ! _uses_token_type "gpg-token"; then
     exit 0
 fi
 
@@ -205,13 +122,13 @@ for _gpgbin in /usr/bin/gpg /usr/bin/gpg-agent /usr/lib/gnupg/scdaemon /usr/bin/
         copy_exec "$_gpgbin"
     else
         echo "WARNING: $_gpgbin not found; GPG smartcard unlock unavailable" >&2
-        if [ "$_using_gpg_token" = true ]; then RV=1; fi
+        if [ "${SMARTCARD_INITRAMFS_INCLUDE:-all}" = "detected" ]; then RV=1; fi
     fi
 done
 
 [ -d "$DESTDIR/cryptroot/gnupghome" ] || mkdir -pm0700 "$DESTDIR/cryptroot/gnupghome"
 
-if [ "$_using_gpg_token" = true ]; then
+if [ "${SMARTCARD_INITRAMFS_INCLUDE:-all}" = "detected" ] && _uses_token_type "gpg-token"; then
     if ! _import_user_keyring_pubkeys_into_initramfs "$DESTDIR/cryptroot/gnupghome"; then
         RV=1
     fi
@@ -227,7 +144,7 @@ elif [ -x "$DESTDIR/usr/bin/pinentry" ]; then
     : # Use existing pinentry from another hook
 else
     echo "WARNING: missing pinentry-curses or pinentry-tty" >&2
-    if [ "$_using_gpg_token" = true ]; then RV=1; fi
+    if [ "${SMARTCARD_INITRAMFS_INCLUDE:-all}" = "detected" ]; then RV=1; fi
 fi
 if [ -n "${pinentry:-}" ]; then
     copy_exec "$pinentry"

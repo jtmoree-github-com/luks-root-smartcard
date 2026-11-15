@@ -1,3 +1,9 @@
+luks-root-smartcard-tools (1.2.1~ppa1~ubuntu26.10.1) stonking; urgency=medium
+
+  * restructure to support dracut
+
+ -- JT Moree <jtmoree@users.noreply.github.com>  Mon, 19 Oct 2026 00:00:00 +0000
+
 luks-root-smartcard-tools (1.1.13~ppa1~ubuntu26.10.1) stonking; urgency=medium
 
   * build packages in tmp
