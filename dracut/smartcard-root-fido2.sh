@@ -86,11 +86,18 @@ TOKEN_ID="$(auto_detect_fido2_token "$DEV" || true)"
 PLUGIN_DIR="$(find_fido2_plugin_dir || true)"
 [ -z "$PLUGIN_DIR" ] && return 0
 
+echo "smartcard-root-fido2: Attempting FIDO2 token unlock..."
+echo "smartcard-root-fido2: When prompted, enter your FIDO2 PIN and/or touch your authenticator."
+
 cryptsetup luksOpen \
     --token-only \
     --token-type systemd-fido2 \
     --token-id "$TOKEN_ID" \
     --external-tokens-path "$PLUGIN_DIR" \
-    "$DEV" "$CRYPTROOT_NAME" 2>/dev/null || true
+    "$DEV" "$CRYPTROOT_NAME" 2>&1 || {
+    echo "smartcard-root-fido2: FIDO2 unlock failed or was cancelled."
+    return 1
+}
 
+echo "smartcard-root-fido2: FIDO2 unlock successful."
 return 0
