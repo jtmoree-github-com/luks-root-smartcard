@@ -14,7 +14,7 @@ This file contains the common setup examples and quick-start commands. For prere
 Use a `dev` variable in the examples below. Set the luks2 root device as the value of the variable before running these.
 
 ```bash
-dev="/dev/nvmen0p1"
+dev="/dev/nvmen0p3"
 ```
 
 ## Stock Debian/Ubuntu GPG key file
@@ -98,9 +98,6 @@ sudo cryptsetup token remove --token-id $tokenid "$dev"
 
 # Remove the associated keyslot used by that token
 sudo cryptsetup luksKillSlot "$dev" <slot>
-
-# Rebuild initramfs
-sudo update-initramfs -u -k "$(uname -r)"
 ```
 
 ## systemd-pkcs11
@@ -137,9 +134,6 @@ sudo update-initramfs -u -k "$(uname -r)"
 ```bash
 # Remove all PKCS#11 enrollments from this LUKS device
 sudo systemd-cryptenroll --wipe-slot=pkcs11 "$dev"
-
-# Rebuild initramfs
-sudo update-initramfs -u -k "$(uname -r)"
 ```
 
 ## FIDO2
@@ -165,9 +159,6 @@ sudo update-initramfs -u -k "$(uname -r)"
 ```bash
 # Remove all FIDO2 enrollments from this LUKS device
 sudo systemd-cryptenroll --wipe-slot=fido2 "$dev"
-
-# Rebuild initramfs
-sudo update-initramfs -u -k "$(uname -r)"
 ```
 
 ## TPM2
@@ -193,9 +184,6 @@ sudo update-initramfs -u -k "$(uname -r)"
 ```bash
 # Remove all TPM2 enrollments from this LUKS device
 sudo systemd-cryptenroll --wipe-slot=tpm2 "$dev"
-
-# Rebuild initramfs
-sudo update-initramfs -u -k "$(uname -r)"
 ```
 
 ### update
