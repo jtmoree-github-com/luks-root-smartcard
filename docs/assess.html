@@ -306,7 +306,7 @@
           id: 'c',
           label: 'Full Disk Encryption (all but EFI)',
           protects: ['2', '3', '10'],
-          vulnerableTo: ['4', '7', '8', '11'],
+          vulnerableTo: ['4', '5', '6', '7', '8', '11'],
           note: 'Protects data from physical theft and extraction, while keeping the EFI outside the encrypted boundary.'
         },
         {
@@ -325,8 +325,8 @@
         },
         {
           id: 'f',
-          label: 'TPM hardware-backed unlock',
-          protects: ['3', '4', '5', '8', '10'],
+          label: 'TPM hardware-backed unlock of root',
+          protects: ['3', '4', '8', '10'],
           vulnerableTo: ['1', '2', '3', '4', '5', '6', '7', '11'],
           note: 'Adds hardware-backed binding for unlock and early boot checks, but is not a complete replacement for good firmware hygiene.'
         },
@@ -354,8 +354,8 @@
         {
           id: 'j',
           label: 'Unified Kernel Image (UKI)',
-          protects: ['3', '4', '5', '8', '10'],
-          vulnerableTo: ['7', '11'],
+          protects: ['3', '4', '5', '8'],
+          vulnerableTo: ['7', '10', '11'],
           note: 'Improves trust in the boot path with signed kernel and initramfs, but should be used carefully because it can be fragile.'
         },
         {
@@ -466,26 +466,15 @@
         const protectsMitigations = MITIGATIONS.filter((mitigation) => mitigation.protects.includes(riskId));
         const hasImplementedProtection = protectsMitigations.some((mitigation) => getSelectedStatus(mitigation.id) === 'implemented');
 
-        const vulnerableMitigations = MITIGATIONS.filter((mitigation) => mitigation.vulnerableTo.includes(riskId));
-        const unresolvedDependency = vulnerableMitigations.some((mitigation) => getSelectedStatus(mitigation.id) !== 'implemented');
-
-        if (riskId === '5' && getSelectedStatus('d') !== 'implemented' && getSelectedStatus('j') !== 'implemented') {
-          return 'exposed';
+        if (riskId === '5') {
+          return (getSelectedStatus('d') === 'implemented' || getSelectedStatus('j') === 'implemented') ? 'covered' : 'exposed';
         }
 
-        if (riskId === '4' && getSelectedStatus('h') !== 'implemented' && getSelectedStatus('d') !== 'implemented' && getSelectedStatus('j') !== 'implemented') {
-          return 'exposed';
+        if (riskId === '4') {
+          return (getSelectedStatus('h') === 'implemented' || getSelectedStatus('d') === 'implemented' || getSelectedStatus('j') === 'implemented') ? 'covered' : 'exposed';
         }
 
-        if (hasImplementedProtection && !unresolvedDependency) {
-          return 'covered';
-        }
-
-        if (hasImplementedProtection && unresolvedDependency) {
-          return 'exposed';
-        }
-
-        return 'exposed';
+        return hasImplementedProtection ? 'covered' : 'exposed';
       }
 
       function implementationCoveragePercent() {
