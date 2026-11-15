@@ -39,6 +39,7 @@ mkdir -p %{buildroot}%{_sbindir}/
 mkdir -p %{buildroot}%{_datadir}/%{name}/
 cp bin/decomm-boot.sh %{buildroot}%{_sbindir}/
 cp bin/rebuild-signed-uki.sh %{buildroot}%{_sbindir}/
+cp bin/smartcard-scan %{buildroot}%{_sbindir}/
 cp scripts/smartcard-common-lib.sh %{buildroot}%{_datadir}/%{name}/
 cp scripts/smartcard-hook-common.sh %{buildroot}%{_datadir}/%{name}/
 cp scripts/gpg-cryptenroll %{buildroot}%{_sbindir}/
@@ -59,6 +60,7 @@ cp conf/initramfs.conf %{buildroot}%{_sysconfdir}/%{name}/
 %{_libdir}/dracut/modules.d/*
 %{_sbindir}/decomm-boot.sh
 %{_sbindir}/rebuild-signed-uki.sh
+%{_sbindir}/smartcard-scan
 %{_sbindir}/gpg-cryptenroll
 %{_sbindir}/gpg-cryptopen
 %{_sbindir}/gpg-cryptmount

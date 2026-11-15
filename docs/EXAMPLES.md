@@ -91,6 +91,13 @@ gpg --list-keys <recipient-or-fingerprint>
 # Enroll a GPG-encrypted key and store it as a LUKS2 token
 sudo gpg-cryptenroll token:auto "$dev" --recipient auto --keyslot auto
 
+# Verify the token was created
+sudo cryptsetup luksDump "$dev"
+
+# Optional: export and review the token metadata
+tokenid=<token-id>
+sudo cryptsetup token export --token-id $tokenid "$dev"
+
 # Rebuild initramfs
 sudo update-initramfs -u -k "$(uname -r)"
 ```
@@ -101,13 +108,13 @@ sudo update-initramfs -u -k "$(uname -r)"
 # List token ids (see "Tokens:" section) and locate type "gpg-token"
 sudo cryptsetup luksDump "$dev"
 tokenid=<token-id>
-sudo cryptsetup token export --token-id $tokenid "$dev"
+keyslot=<keyslot>
 
 # Remove the token metadata
 sudo cryptsetup token remove --token-id $tokenid "$dev"
 
 # Remove the associated keyslot used by that token
-sudo cryptsetup luksKillSlot "$dev" <slot>
+sudo cryptsetup luksKillSlot "$dev" $keyslot
 ```
 
 ## systemd-pkcs11

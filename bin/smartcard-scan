@@ -1,0 +1,156 @@
+#!/bin/bash
+# List all available smartcards with compatible workflows as a markdown table
+
+# Parse arguments
+INTERACTIVE=true
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --no-interactive|-n)
+            INTERACTIVE=false
+            shift
+            ;;
+        *)
+            shift
+            ;;
+    esac
+done
+
+# Ask if user wants to detect enrollment status (requires sudo)
+CHECK_ENROLLED=false
+if [ "$EUID" -ne 0 ]; then
+    if [ "$INTERACTIVE" = true ]; then
+        echo "To detect currently enrolled smartcards, you need to run this script with sudo." >&2
+        echo "Do you want to run with sudo to check enrollment status? (Y/n): " >&2
+        read -r response
+        if [[ ! "$response" =~ ^[Nn] ]]; then
+            # Re-run with sudo, preserving all arguments
+            exec sudo "$0" --no-interactive "$@"
+        fi
+    fi
+else
+    # Running as root, can check enrollment
+    CHECK_ENROLLED=true
+fi
+
+echo "Scanning for smartcards... (this may take up to a minute)" >&2
+
+TMPDIR=${TMPDIR:-/tmp}
+FIDO2_FILE="$TMPDIR/identify-smartcards-fido2.$$"
+PKCS11_FILE="$TMPDIR/identify-smartcards-pkcs11.$$"
+PCSC_FILE="$TMPDIR/identify-smartcards-pcsc.$$"
+USB_FILE="$TMPDIR/identify-smartcards-usb.$$"
+LUKS_FILE="$TMPDIR/identify-smartcards-luks.$$"
+
+trap "rm -f $FIDO2_FILE $PKCS11_FILE $PCSC_FILE $USB_FILE $LUKS_FILE" EXIT
+
+# Get FIDO2 tokens
+timeout 2 fido2-token -L 2>/dev/null > "$FIDO2_FILE" || touch "$FIDO2_FILE"
+
+# Get PKCS#11 slots (can be slow)
+timeout 15 pkcs11-tool --list-slots 2>/dev/null </dev/null > "$PKCS11_FILE" || touch "$PKCS11_FILE"
+
+# Get PC/SC readers
+timeout 2 pcsc_scan 2>/dev/null | grep "Reader.*:" > "$PCSC_FILE" || touch "$PCSC_FILE"
+
+# Get USB smartcard devices (YubiKey, etc.)
+lsusb 2>/dev/null | grep -iE "yubikey|yubico|smartcard" > "$USB_FILE" || touch "$USB_FILE"
+
+# Find the root LUKS device
+ROOT_DEVICE=""
+if mount | grep -q " / "; then
+    MAPPER_NAME=$(mount | grep " / " | awk '{print $1}' | grep -o "luks-.*")
+    if [ -n "$MAPPER_NAME" ] && grep -q "$MAPPER_NAME" /etc/crypttab 2>/dev/null; then
+        UUID=$(grep "$MAPPER_NAME" /etc/crypttab | awk '{print $2}' | sed 's/UUID=//' | awk '{print $1}')
+        if [ -n "$UUID" ]; then
+            ROOT_DEVICE="/dev/disk/by-uuid/$UUID"
+        fi
+    fi
+fi
+
+# Get LUKS tokens if root device found
+if [ -n "$ROOT_DEVICE" ] && [ -e "$ROOT_DEVICE" ] && [ "$CHECK_ENROLLED" = true ]; then
+    cryptsetup luksDump "$ROOT_DEVICE" 2>/dev/null | grep -E "Token|Keyslot" > "$LUKS_FILE" || touch "$LUKS_FILE"
+else
+    touch "$LUKS_FILE"
+fi
+
+check_enrolled() {
+    local card="$1"
+    
+    # If enrollment detection wasn't requested or available
+    if [ "$CHECK_ENROLLED" = false ]; then
+        echo "run with sudo to check"
+        return
+    fi
+    
+    # If LUKS file is empty, we couldn't read the header
+    if [ ! -s "$LUKS_FILE" ]; then
+        echo "no"
+        return
+    fi
+    
+    # Check if there are ANY tokens in the LUKS header
+    # Token entries in luksDump look like "  0: systemd-fido2" or "  0: gpg-token"
+    if grep -E "^  [0-9]+: " "$LUKS_FILE" | grep -qv "^$"; then
+        echo "yes"
+    else
+        echo "no"
+    fi
+}
+
+echo "| ID | Card | Compatible | Status | Enrolled |"
+echo "|----|----|-------------|--------|----------|"
+
+# Process PC/SC readers
+while IFS= read -r line; do
+    id=$(echo "$line" | sed 's/: .*//')
+    card=$(echo "$line" | sed 's/^[^:]*: //')
+    workflows=""
+    status=""
+    enrolled=""
+    
+    # Check FIDO2 - match by vendor/product name
+    if grep -qi "$(echo "$card" | cut -d'[' -f1 | xargs)" "$FIDO2_FILE" 2>/dev/null; then
+        workflows="fido2"
+    fi
+    
+    # Check PKCS#11 - match by full card name
+    if grep -F "$card" "$PKCS11_FILE" > /dev/null 2>&1; then
+        if [ -n "$workflows" ]; then
+            workflows="$workflows gpg-token systemd-pkcs11"
+        else
+            workflows="gpg-token systemd-pkcs11"
+        fi
+        status="initialized"
+    else
+        # Not in PKCS#11 - might be uninitialized
+        if [ -z "$workflows" ]; then
+            status="uninitialized"
+        else
+            status="PKCS#11 not ready"
+        fi
+    fi
+    
+    enrolled=$(check_enrolled "$card")
+    echo "| $id | $card | $workflows | $status | $enrolled |"
+done < "$PCSC_FILE"
+
+# Process USB-detected smartcards not in PC/SC
+if [ -s "$USB_FILE" ]; then
+    counter=100
+    while IFS= read -r line; do
+        # Extract device name from lsusb output
+        card=$(echo "$line" | sed 's/.*: //')
+        workflows=""
+        enrolled=""
+        
+        # Check FIDO2
+        if grep -qi "yubico\|yubikey" "$FIDO2_FILE" 2>/dev/null; then
+            workflows="fido2"
+        fi
+        
+        enrolled=$(check_enrolled "$card")
+        echo "| USB-$counter | $card | $workflows | ready | $enrolled |"
+        ((counter++))
+    done < "$USB_FILE"
+fi
