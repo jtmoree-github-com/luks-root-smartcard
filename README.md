@@ -1,8 +1,8 @@
 # luks-root-smartcard-tools
 
-**Smartcard-based LUKS root unlock for Debian/Ubuntu initramfs**
+**Smartcard-based LUKS root unlock for initrd**
 
-This project integrates smartcard setup and boot with initramfs and LUKS so encrypted root volumes can be unlocked with hardware (e.g. tpm, gpg, fido) with passphrase fallback without requiring systemd in initrd.
+This project integrates smartcard setup and boot with initramfs or dracut and LUKS so encrypted root volumes can be unlocked with hardware (e.g. tpm, gpg, fido) with passphrase fallback without requiring systemd in initrd.
 
 Your options may be constrained by your hardware and LUKS version.
 

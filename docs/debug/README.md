@@ -4,6 +4,38 @@ When troubleshooting LUKS root unlock or the smartcard integration, debug output
 
 ---
 
+## Table of Contents
+
+- [🚀 Quick Start](#-quick-start-enable-debug-output)
+  - [Method 1: Temporary Debug (GRUB)](#method-1-temporary-debug-grub-bootloader---classic-systems-only)
+  - [Method 2: Persistent Debug (TPM2)](#method-2-persistent-debug-with-tpm2-sealed-flag-uki-only)
+  - [Method 3: Compile-Time Debug](#method-3-compile-time-debug-development-only)
+- [🔍 Debug Output: Where to Look](#-debug-output-where-to-look)
+  - [1. Initramfs Boot Messages](#1-initramfs-boot-messages-real-time)
+  - [2. Kernel Message Buffer](#2-kernel-message-buffer)
+  - [3. systemd Journal](#3-systemd-journal)
+  - [4. /dev/kmsg](#4-devkmsg-direct-kernel-messages)
+  - [5. Temporary Log File](#5-temporary-log-file-manual-debugging)
+- [📋 Common Debug Scenarios](#-common-debug-scenarios)
+  - [Scenario 1: LUKS Unlock Failed](#scenario-1-luks-unlock-failed---no-token-found)
+  - [Scenario 2: TPM Seal Not Unsealing](#scenario-2-tpm-seal-not-unsealing)
+  - [Scenario 3: TPM Device Not Found](#scenario-3-tpm-device-not-found)
+  - [Scenario 4: No Debug Output](#scenario-4-no-debug-output---silent-boot)
+- [🔧 Advanced: Debugging Without TPM](#-advanced-debugging-without-tpm)
+  - [Fallback Chain](#fallback-chain)
+  - [Token Types (Independent of Debug)](#token-types-independent-of-debug)
+- [📖 Debug Methods Summary](#-debug-methods-summary)
+- [🔐 Security Considerations](#-security-considerations)
+  - [TPM2 Sealed Debug](#tpm2-sealed-debug)
+  - [Kernel Parameter Debug](#kernel-parameter-debug)
+  - [Compile-Time Debug](#compile-time-debug)
+- [🐛 Troubleshooting Debug Itself](#-troubleshooting-debug-itself)
+- [📚 Related Documentation](#-related-documentation)
+- [🔗 External References](#-external-references)
+- **📖 [TPM2_SEAL.md](./TPM2_SEAL.md)** — Detailed TPM2 sealing technical reference
+
+---
+
 ## 🚀 QUICK START: Enable Debug Output
 
 ### Method 1: Temporary Debug (GRUB Bootloader - Classic Systems Only)
