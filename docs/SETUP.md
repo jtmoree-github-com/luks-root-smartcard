@@ -16,14 +16,14 @@ This guide covers prerequisites, boot-time behavior, and package internals for t
 
 **TL;DR;**
 
-Pick the workflow.  TPM is a good place to start.  If that fails pick the workflow most compatible with your smartcard.  Look online for hardware recommendations.  Stock Debian does not need anything in this package but we include a utility and example to help set it up.
+Pick the workflow.  TPM is a good place to start.  If that fails, pick the workflow most compatible with your smartcard.  Look online for hardware recommendations.  Stock Debian does not need anything in this package but we include a utility and example to help set it up.
 
 - Stock [Debian/Ubuntu GPG key file](#debianubuntu-gpg-key-file-workflow-stock) for the Debian-managed GPG key-file workflow using `decrypt_gnupg-sc`.
 - [FIDO2](#fido2-workflow) for a FIDO2 authenticator
 - [GPG token](#gpg-token-workflow) for a GPG smartcard token in the LUKS2 header
 - [PKCS#11](#pkcs11-workflow) for a smartcard-backed PKCS#11 token
 - [Post-boot mount](EXAMPLES.md#mount-token-based-drive-after-boot) for unlocking and mounting a secondary drive later
-- [TPM2](#tpm2-workflow) for a TPM-backed LUKS2 token
+- [TPM lite](#tpm-lite) for a TPM-backed LUKS2 token (does not check PCR registers)
 
 ## Prerequisites
 
@@ -98,9 +98,9 @@ See the [PKCS#11 example](EXAMPLES.md#systemd-pkcs11).
 - `pkcs11-tool` can enumerate the relevant certificate/key object
 - `pcscd` and the PKCS#11 provider are available in initramfs
 
-### TPM2 workflow
+### TPM Lite
 
-See the [TPM2 example](EXAMPLES.md#tpm2).
+See the [TPM example](EXAMPLES.md#tpm2).
 
 #### Setup
 

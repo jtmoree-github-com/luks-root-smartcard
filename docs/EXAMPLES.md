@@ -161,7 +161,9 @@ sudo update-initramfs -u -k "$(uname -r)"
 sudo systemd-cryptenroll --wipe-slot=fido2 "$dev"
 ```
 
-## TPM2
+## TPM lite
+
+Note that this method does not check the tpm signatures.  It just uses the systemd tpm feature to unlock the root volume.  It is not a full implementation that would be used by Secure Boot.  Most tpm solutions don't check the initrd which makes them pointless.
 
 ### enroll
 
