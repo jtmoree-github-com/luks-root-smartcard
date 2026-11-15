@@ -21,22 +21,27 @@ dev="/dev/nvmen0p3"
 
 This is the Debian-managed stock GPG key-file workflow: the encrypted key stays on disk and is decrypted in initramfs with the system's `decrypt_gnupg-sc` keyscript. The gpg-cryptenroll utility from this package can assist with setup but everything else is handled by other packages.  Check those if you have issues.
 
+### install
+
+Install the workflow stack if needed
+
+```bash
+sudo apt install gnupg scdaemon pcscd cryptsetup-initramfs
+```
+
+Set crypttab: stock Debian/Ubuntu key file + keyscript=decrypt_gnupg-sc (edit /etc/crypttab so the line reads: 
+
+     <name> UUID=<uuid> /boot/root.key.gpg luks,keyscript=decrypt_gnupg-sc
+
 ### enroll
 
 ```bash
-# Install the workflow stack if needed
-sudo apt install gnupg scdaemon pcscd cryptsetup-initramfs
-
 # Find your root mapping details
 # Enroll a GPG-encrypted key file in the stock Debian/Ubuntu style
 sudo gpg-cryptenroll file:/boot/root.key.gpg "$dev" --recipient auto --keyslot auto
 
 # Export your public key for the initramfs
 gpg --export <recipient> >/etc/cryptsetup-initramfs/pubring.gpg
-
-# Set crypttab: stock Debian/Ubuntu key file + keyscript=decrypt_gnupg-sc
-# (edit /etc/crypttab so the line reads:)
-#   <name> UUID=<uuid> /boot/root.key.gpg luks,keyscript=decrypt_gnupg-sc
 
 # Rebuild initramfs
 sudo update-initramfs -u -k "$(uname -r)"
@@ -60,12 +65,20 @@ sudo update-initramfs -u -k "$(uname -r)"
 
 ## GPG token
 
-### enroll
+### Install
+
+Recommended: set crypttab field 3 to none for token mode (edit /etc/crypttab so the line reads: <name> UUID=<uuid> none luks)
+
+You will need to rebuild the initrd after the enroll to get public keys into it.
 
 ```bash
 # Install the workflow stack if needed
 sudo apt install gnupg scdaemon pcscd
+```
 
+### enroll
+
+```bash
 # Ensure your smartcard public key is present in your user keyring.
 # The initramfs hook exports from that keyring and imports into initramfs GNUPGHOME.
 gpg --list-keys <recipient-or-fingerprint>
@@ -77,9 +90,6 @@ gpg --list-keys <recipient-or-fingerprint>
 # Find your root mapping details
 # Enroll a GPG-encrypted key and store it as a LUKS2 token
 sudo gpg-cryptenroll token:auto "$dev" --recipient auto --keyslot auto
-
-# Recommended: set crypttab field 3 to none for token mode
-# (edit /etc/crypttab so the line reads: <name> UUID=<uuid> none luks)
 
 # Rebuild initramfs
 sudo update-initramfs -u -k "$(uname -r)"
@@ -102,13 +112,23 @@ sudo cryptsetup luksKillSlot "$dev" <slot>
 
 ## systemd-pkcs11
 
-### enroll
+If you have not already rebuilt the initrd you need to do that to get support for this token into it.
+
+Recommended: first set crypttab field 3 to none for token mode (edit /etc/crypttab so the line reads: <name> UUID=<uuid> none luks)
+
+### install
 
 ```bash
 # Install the workflow stack if needed
 sudo apt install opensc pcscd
+sudo update-initramfs -u -k "$(uname -r)"
+```
 
-# Enroll the smartcard (prompts for LUKS passphrase and card PIN)
+### enroll
+
+Enroll the smartcard (prompts for LUKS passphrase and card PIN)
+
+```bash
 sudo systemd-cryptenroll --pkcs11-token-uri="auto" "$dev"
 
 # If it fails with "Provided URI matches multiple public keys, refusing.",
@@ -121,43 +141,43 @@ p11tool --list-all --detailed-url --only-urls $token
 # 3) Copy one full object URI (prefer one with id= and object=) and enroll with it:
 uri='pkcs11:...;id=%03;object=Authentication%20key;type=public'
 sudo systemd-cryptenroll --pkcs11-token-uri="$uri" "$dev"
-
-# Recommended: set crypttab field 3 to none for token mode
-# (edit /etc/crypttab so the line reads: <name> UUID=<uuid> none luks)
-
-# Rebuild initramfs
-sudo update-initramfs -u -k "$(uname -r)"
 ```
 
 ### remove
 
+Remove all PKCS#11 enrollments from this LUKS device
+
 ```bash
-# Remove all PKCS#11 enrollments from this LUKS device
 sudo systemd-cryptenroll --wipe-slot=pkcs11 "$dev"
 ```
 
 ## FIDO2
 
-### enroll
+If you have not already rebuilt the initrd you need to do that to get support for this token into it.
+
+Recommended: first set crypttab field 3 to none for token mode (edit /etc/crypttab so the line reads: <name> UUID=<uuid> none luks)
+
+### install
 
 ```bash
 # Install the workflow stack if needed
 sudo apt install libfido2-1 fido2-tools
-
-# Enroll FIDO2-based unlock (prompts for LUKS passphrase and token touch/PIN as needed)
-sudo systemd-cryptenroll --fido2-device=auto "$dev"
-
-# Recommended: set crypttab field 3 to none for token mode
-# (edit /etc/crypttab so the line reads: <name> UUID=<uuid> none luks)
-
-# Rebuild initramfs
 sudo update-initramfs -u -k "$(uname -r)"
+```
+
+### enroll
+
+Enroll FIDO2-based unlock (prompts for LUKS passphrase and token touch/PIN as needed)
+
+```bash
+sudo systemd-cryptenroll --fido2-device=auto "$dev"
 ```
 
 ### remove
 
+Remove all FIDO2 enrollments from this LUKS device
+
 ```bash
-# Remove all FIDO2 enrollments from this LUKS device
 sudo systemd-cryptenroll --wipe-slot=fido2 "$dev"
 ```
 
@@ -165,20 +185,23 @@ sudo systemd-cryptenroll --wipe-slot=fido2 "$dev"
 
 Note that this method does not check the tpm signatures.  It just uses the systemd tpm feature to unlock the root volume.  It is not a full implementation that would be used by Secure Boot.  Most tpm solutions don't check the initrd which makes them pointless.
 
-### enroll
+### install
+
+If you have not already rebuilt the initrd you need to do that to get support for this token into it.
+
+Recommended: first set crypttab field 3 to none for token mode (edit /etc/crypttab so the line reads: <name> UUID=<uuid> none luks)
 
 ```bash
 # Install the workflow stack if needed
 sudo apt install systemd-cryptsetup
+sudo update-initramfs -u -k "$(uname -r)"
+```
 
+### enroll
+
+```bash
 # Enroll TPM2-based unlock against PCR 7
 sudo systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs=7 "$dev"
-
-# Recommended: set crypttab for tpm mode
-# (edit /etc/crypttab so the line reads: <name> UUID=<uuid> none luks,discard)
-
-# Rebuild initramfs
-sudo update-initramfs -u -k "$(uname -r)"
 ```
 
 ### remove
