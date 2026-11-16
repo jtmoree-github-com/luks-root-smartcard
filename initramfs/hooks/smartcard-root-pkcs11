@@ -21,60 +21,26 @@ esac
 
 . /usr/share/initramfs-tools/hook-functions
 
+# Source shared libraries - try multiple paths for build-time flexibility
+_source_lib() {
+    if [ -f "/usr/share/luks-root-smartcard/$1" ]; then
+        . "/usr/share/luks-root-smartcard/$1"
+    elif [ -f "scripts/$1" ]; then
+        . "scripts/$1"
+    else
+        echo "ERROR: Cannot find $1" >&2
+        return 1
+    fi
+}
+
+_source_lib "smartcard-common-lib.sh"
+
 # Asset inclusion mode, evaluated at initramfs generation time.
 #   all      - include this workflow's assets unconditionally (default)
 #   detected - include only when a matching token is in the root LUKS2 header
-# Override persistently via /etc/luks-root-smartcard/initramfs.conf, or per-run
-# via the SMARTCARD_INITRAMFS_INCLUDE environment variable.
-SMARTCARD_INITRAMFS_INCLUDE="${SMARTCARD_INITRAMFS_INCLUDE:-all}"
-[ -r /etc/luks-root-smartcard/initramfs.conf ] && . /etc/luks-root-smartcard/initramfs.conf
+_load_inclusion_config "SMARTCARD_INITRAMFS_INCLUDE" "all"
 
-# Token-driven activation: for each crypttab entry, resolve the backing device
-# and scan its LUKS2 header for a systemd-pkcs11 token. If found, include
-# assets. If a device cannot be resolved at build time, include conservatively.
-_resolve_dev_hook() {
-    case "$1" in
-        UUID=*)      blkid -U "${1#UUID=}" 2>/dev/null ;;
-        LABEL=*)     blkid -L "${1#LABEL=}" 2>/dev/null ;;
-        PARTUUID=*)  echo "/dev/disk/by-partuuid/${1#PARTUUID=}" ;;
-        PARTLABEL=*) echo "/dev/disk/by-partlabel/${1#PARTLABEL=}" ;;
-        *)           echo "$1" ;;
-    esac
-}
-
-_has_systemd_pkcs11_token() {
-    _hdev="$1"
-    _hi=0
-    while [ "$_hi" -lt 32 ]; do
-        _hjson="$(cryptsetup token export --token-id "$_hi" "$_hdev" 2>/dev/null || true)"
-        if [ -n "$_hjson" ] && printf '%s' "$_hjson" | grep -q '"type":"systemd-pkcs11"'; then
-            return 0
-        fi
-        _hi=$(( _hi + 1 ))
-    done
-    return 1
-}
-
-_using_pkcs11_token=false
-_crypttab="${TABFILE:-/etc/crypttab}"
-if [ -f "$_crypttab" ]; then
-    while IFS= read -r _ctline; do
-        case "$_ctline" in ''|'#'*) continue ;; esac
-        set -- $_ctline
-        [ "$#" -ge 2 ] || continue
-        _hdev="$(_resolve_dev_hook "$2" 2>/dev/null || true)"
-        if [ -b "$_hdev" ]; then
-            if _has_systemd_pkcs11_token "$_hdev"; then
-                _using_pkcs11_token=true
-                break
-            fi
-        else
-            _using_pkcs11_token=true
-            break
-        fi
-    done < "$_crypttab"
-fi
-if [ "${SMARTCARD_INITRAMFS_INCLUDE:-all}" = "detected" ] && [ "$_using_pkcs11_token" = false ]; then
+if [ "${SMARTCARD_INITRAMFS_INCLUDE:-all}" = "detected" ] && ! _uses_token_type "systemd-pkcs11"; then
     exit 0
 fi
 
@@ -94,27 +60,7 @@ else
 fi
 
 # Prefer the native cryptsetup systemd-pkcs11 token plugin when present.
-# Copy the plugin and its linked dependencies to avoid runtime load failures
-# inside initramfs.
-_plugin_copied=false
-for plugin in \
-    /usr/lib/*/cryptsetup/libcryptsetup-token-systemd-pkcs11.so \
-    /usr/lib64/cryptsetup/libcryptsetup-token-systemd-pkcs11.so \
-    /lib/*/cryptsetup/libcryptsetup-token-systemd-pkcs11.so \
-    /lib64/cryptsetup/libcryptsetup-token-systemd-pkcs11.so; do
-    [ -f "$plugin" ] || continue
-    copy_exec "$plugin"
-    _plugin_copied=true
-
-    ldd "$plugin" 2>/dev/null \
-        | awk '/=> \/|^\// {print $(NF-1)}' \
-        | while IFS= read -r so; do
-            [ -f "$so" ] && copy_exec "$so"
-        done
-    break
-done
-
-if [ "$_plugin_copied" = false ]; then
+if ! _copy_cryptsetup_plugin copy_exec "systemd-pkcs11"; then
     echo "WARNING: systemd PKCS#11 cryptsetup token plugin not found, plugin unlock will not work" >&2
 fi
 

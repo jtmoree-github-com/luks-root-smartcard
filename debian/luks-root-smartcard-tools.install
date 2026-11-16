@@ -1,3 +1,8 @@
+bin/decomm-boot.sh usr/sbin/
+bin/rebuild-signed-uki.sh usr/sbin/
+bin/smartcard-scan usr/sbin/
+scripts/smartcard-common-lib.sh usr/share/luks-root-smartcard/
+scripts/smartcard-hook-common.sh usr/share/luks-root-smartcard/
 initramfs/hooks/smartcard-root-gpg usr/share/initramfs-tools/hooks/
 initramfs/hooks/smartcard-root-common usr/share/initramfs-tools/hooks/
 initramfs/hooks/smartcard-root-pkcs11 usr/share/initramfs-tools/hooks/

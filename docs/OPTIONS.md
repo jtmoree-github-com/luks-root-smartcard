@@ -29,7 +29,7 @@ If booting multiple systems it will limit options.  Booting MS Windows severely 
 | c. Full Disk Encryption (all but EFI) | 2,3,10 | 4,7,8,11 |
 | d. Encrypt the boot partition | 4,5,10 | 3,4,5,7,8,11 |
 | e. Encrypt the root partition | 6,10 | 3,4,5,7,8,11 |
-| f. TPM hardware-backed unlock | 3,4,5,8,10 | 1,2,3,4,5,6,7,11 |
+| f. TPM hardware-backed unlock of root | 3,4,8,10 | 1,2,3,4,5,6,7,11 |
 | g. Keep a tested recovery path | 7 | 1,2,3,4,5,6,8,10,11 |
 | h. Secure Boot | 4 | 1,2,3,5,6,7,8,10,11 |
 | i. Secured backups | 9,10 | 1,2,3,4,5,6,7,8,11 |
